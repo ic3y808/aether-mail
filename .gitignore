@@ -7,3 +7,4 @@ Aether-Mail/Aether-Mail.entitlements
 DerivedData/
 *.xcuserstate
 .DS_Store
+Aether-Mail/OAuthClients.plist

@@ -66,6 +66,78 @@ final class MailStore {
         return client
     }
 
+    /// Connect + authenticate for a saved account — password OR OAuth (XOAUTH2).
+    private func openIMAP(for account: MailAccount) async throws -> IMAPClient {
+        let client = IMAPClient(transport: makeTransport(account.imap))
+        try await client.connect()
+        if account.imap.security == .startTLS { try await client.startTLS() }
+        if account.provider.authKind == .oauth {
+            let token = try await validAccessToken(for: account)
+            try await client.authenticateXOAUTH2(user: account.emailAddress, accessToken: token)
+        } else if let pw = Keychain.getString(account.credentialRef) {
+            try await client.login(user: account.emailAddress, password: pw)
+        } else {
+            throw NSError(domain: "AetherMail", code: 1, userInfo: [NSLocalizedDescriptionKey: "No saved credentials."])
+        }
+        return client
+    }
+
+    // OAuth tokens live as JSON in the Keychain under the account's credentialRef.
+    private func storeTokens(_ tokens: OAuthTokens, ref: String) {
+        if let data = try? JSONEncoder().encode(tokens), let s = String(data: data, encoding: .utf8) {
+            Keychain.set(s, for: ref)
+        }
+    }
+    private func loadTokens(_ ref: String) -> OAuthTokens? {
+        guard let s = Keychain.getString(ref), let data = s.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(OAuthTokens.self, from: data)
+    }
+    private func validAccessToken(for account: MailAccount) async throws -> String {
+        guard var tokens = loadTokens(account.credentialRef) else {
+            throw NSError(domain: "AetherMail", code: 2, userInfo: [NSLocalizedDescriptionKey: "Please sign in again."])
+        }
+        if tokens.isExpired, let refresh = tokens.refreshToken, let config = OAuthClients.config(for: account.provider) {
+            tokens = try await OAuthAuthenticator().refresh(config: config, refreshToken: refresh)
+            storeTokens(tokens, ref: account.credentialRef)
+        }
+        return tokens.accessToken
+    }
+
+    /// "Sign in with Google / Microsoft": runs the OAuth flow, validates over
+    /// XOAUTH2, then saves. `email` is the mailbox this account is for.
+    func addOAuthAccount(provider: MailProvider, email rawEmail: String) async -> String? {
+        let email = rawEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard email.contains("@") else { return "Enter your email address first." }
+        guard let config = OAuthClients.config(for: provider) else {
+            return "\(provider.displayName) sign-in isn't configured in this build."
+        }
+        let tokens: OAuthTokens
+        do {
+            tokens = try await OAuthAuthenticator().signIn(config: config)
+        } catch {
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+        let imap = ProviderCatalog.imap(for: provider)
+        do {
+            let client = IMAPClient(transport: makeTransport(imap))
+            try await client.connect()
+            try await client.authenticateXOAUTH2(user: email, accessToken: tokens.accessToken)
+            _ = try await client.select("INBOX")
+            await client.disconnect()
+        } catch {
+            return "Signed in, but couldn't reach the mailbox — \(friendly(error))"
+        }
+        let ref = "oauth-\(email)-\(UUID().uuidString)"
+        storeTokens(tokens, ref: ref)
+        let account = MailAccount(provider: provider, emailAddress: email, displayName: email,
+                                  imap: imap, smtp: ProviderCatalog.smtp(for: provider),
+                                  credentialRef: ref, sortIndex: accounts.count)
+        accounts.append(account)
+        persist()
+        await sync(account)
+        return nil
+    }
+
     // MARK: - Add / remove account
 
     /// Validates + saves an account, then syncs it. Returns an error string on
@@ -114,9 +186,8 @@ final class MailStore {
     // MARK: - Sync
 
     func sync(_ account: MailAccount) async {
-        guard let password = Keychain.getString(account.credentialRef) else { return }
         do {
-            let client = try await openIMAP(account.imap, email: account.emailAddress, password: password)
+            let client = try await openIMAP(for: account)
             _ = try await client.select("INBOX")
             let uids = try await client.uidSearch("ALL")
             let recent = Array(uids.suffix(60))            // newest 60
@@ -145,9 +216,9 @@ final class MailStore {
     func open(_ m: MailMessage) {
         readIDs.insert(m.id)                                // local mark-read
         Task { await loadBody(m) }
-        if m.isUnread, let account = account(for: m), let pw = Keychain.getString(account.credentialRef) {
+        if m.isUnread, let account = account(for: m) {
             Task {                                          // best-effort \Seen on the server
-                if let client = try? await openIMAP(account.imap, email: account.emailAddress, password: pw) {
+                if let client = try? await openIMAP(for: account) {
                     _ = try? await client.select(m.folderPath)
                     try? await client.store(uid: m.uid, flag: "\\Seen", add: true)
                     await client.disconnect()
@@ -157,10 +228,9 @@ final class MailStore {
     }
 
     private func loadBody(_ m: MailMessage) async {
-        guard openBodies[m.id] == nil, let account = account(for: m),
-              let password = Keychain.getString(account.credentialRef) else { return }
+        guard openBodies[m.id] == nil, let account = account(for: m) else { return }
         do {
-            let client = try await openIMAP(account.imap, email: account.emailAddress, password: password)
+            let client = try await openIMAP(for: account)
             _ = try await client.select(m.folderPath)
             let raw = try await client.fetchRawMessage(uid: m.uid)
             await client.disconnect()

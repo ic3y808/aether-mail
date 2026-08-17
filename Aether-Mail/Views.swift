@@ -81,11 +81,16 @@ struct AddMailboxView: View {
     @State private var email = ""
     @State private var password = ""
     @State private var customHost = ""
-    @State private var connecting = false
+    @State private var working = false
     @State private var error: String?
 
     /// Proton needs the local Bridge (a Mac), so it's not offered on iOS.
     private let providers: [MailProvider] = [.icloud, .gmail, .outlook, .custom]
+
+    /// Gmail/Outlook use OAuth when this build has the client IDs configured.
+    private var usesOAuth: Bool {
+        (provider == .gmail && OAuthClients.hasGoogle) || (provider == .outlook && OAuthClients.hasMicrosoft)
+    }
 
     var body: some View {
         NavigationStack {
@@ -99,16 +104,32 @@ struct AddMailboxView: View {
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
                     }
                 }
-                Section("Sign in") {
+                Section(usesOAuth ? "Your email" : "Sign in") {
                     TextField("Email", text: $email)
                         .textContentType(.username).keyboardType(.emailAddress)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    SecureField("App-specific password", text: $password)
-                        .textContentType(.password)   // surfaces iCloud Keychain autofill
+                    if !usesOAuth {
+                        SecureField("App-specific password", text: $password)
+                            .textContentType(.password)   // surfaces iCloud Keychain autofill
+                    }
                 }
-                if provider == .gmail || provider == .outlook {
+                if usesOAuth {
                     Section {
-                        Text("Gmail/Outlook need an **app-specific password** (with 2-factor enabled), not your normal password. Full OAuth sign-in is coming.")
+                        Button { oauthSignIn() } label: {
+                            HStack {
+                                Image(systemName: provider == .gmail ? "g.circle.fill" : "m.circle.fill")
+                                Text("Sign in with \(provider == .gmail ? "Google" : "Microsoft")")
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(working || email.isEmpty)
+                    } footer: {
+                        Text("Opens a secure \(provider.displayName) sign-in sheet — no password is stored.")
+                    }
+                } else if provider == .gmail || provider == .outlook {
+                    Section {
+                        Text("These need an **app-specific password** (with 2-factor on). OAuth sign-in isn't configured in this build.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -118,15 +139,15 @@ struct AddMailboxView: View {
             }
             .navigationTitle("Add Mailbox")
             .navigationBarTitleDisplayMode(.inline)
-            .interactiveDismissDisabled(connecting)
+            .interactiveDismissDisabled(working)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }.disabled(connecting)
+                    Button("Cancel") { dismiss() }.disabled(working)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    if connecting { ProgressView() }
-                    else {
-                        Button("Connect") { connect() }
+                    if working { ProgressView() }
+                    else if !usesOAuth {
+                        Button("Connect") { passwordConnect() }
                             .disabled(email.isEmpty || password.isEmpty)
                     }
                 }
@@ -134,13 +155,20 @@ struct AddMailboxView: View {
         }
     }
 
-    private func connect() {
-        error = nil
-        connecting = true
+    private func passwordConnect() {
+        error = nil; working = true
         Task {
-            let result = await store.addAccount(provider: provider, email: email, password: password, customHost: customHost)
-            connecting = false
-            if let result { error = result } else { dismiss() }
+            let r = await store.addAccount(provider: provider, email: email, password: password, customHost: customHost)
+            working = false
+            if let r { error = r } else { dismiss() }
+        }
+    }
+    private func oauthSignIn() {
+        error = nil; working = true
+        Task {
+            let r = await store.addOAuthAccount(provider: provider, email: email)
+            working = false
+            if let r { error = r } else { dismiss() }
         }
     }
 }

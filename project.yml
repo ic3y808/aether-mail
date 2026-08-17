@@ -43,6 +43,13 @@ targets:
         NSFaceIDUsageDescription: Aether Mail uses Face ID to unlock your stored mail account credentials.
         # Proton Mail Bridge / a Mac running big models can live on the LAN.
         NSLocalNetworkUsageDescription: Aether Mail connects to mail servers and, for AI, a Mac on your local network.
+        # OAuth redirect scheme for Microsoft (reuses the Aether Courier Azure
+        # registration). Google's reversed-client-id scheme is injected at build
+        # time from the gitignored OAuthClients.plist (it embeds your client ID).
+        CFBundleURLTypes:
+          - CFBundleURLName: com.aether.mail.oauth
+            CFBundleURLSchemes:
+              - com.aether.courier
         UILaunchScreen:
           UIColorName: ""
         UISupportedInterfaceOrientations:

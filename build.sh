@@ -34,6 +34,20 @@ esac
 
 xcodegen generate
 
+# Inject the Google OAuth redirect scheme (com.googleusercontent.apps.<id>) into
+# the generated Info.plist from the gitignored OAuthClients.plist — it embeds the
+# client ID, so it must NOT be committed. Absent plist = Google OAuth just off.
+OAUTH_PLIST="Aether-Mail/OAuthClients.plist"
+INFO_PLIST="Aether-Mail/Info.plist"
+if [ -f "$OAUTH_PLIST" ] && [ -f "$INFO_PLIST" ]; then
+  GID="$(/usr/libexec/PlistBuddy -c 'Print :google' "$OAUTH_PLIST" 2>/dev/null || true)"
+  if [ -n "$GID" ]; then
+    REV="com.googleusercontent.apps.${GID%.apps.googleusercontent.com}"
+    /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string $REV" "$INFO_PLIST" >/dev/null 2>&1 \
+      && echo "→ injected Google OAuth URL scheme"
+  fi
+fi
+
 if [ "$MODE" = "device" ]; then
   xcodebuild \
     -project Aether-Mail.xcodeproj \
