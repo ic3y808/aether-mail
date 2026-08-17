@@ -1,0 +1,78 @@
+# XcodeGen spec for Aether Mail — the iOS/iPadOS email client.
+#
+# The iPhone/iPad sibling of Aether-Courier (macOS). It reuses the SAME mail
+# engine — the EmailKit Swift package, vendored from ../Aether-Courier/EmailKit
+# rather than duplicated — and owns only the iOS navigation idiom and its own
+# entry point. AI routing (on-device → Mac → cloud) is layered in later and, per
+# the project rules, its private endpoints stay OUT of any public export.
+#
+# Install XcodeGen (`brew install xcodegen`), run `xcodegen generate` here (or
+# ./build.sh), and open Aether-Mail.xcodeproj. The .xcodeproj / Info.plist /
+# entitlements are generated and gitignored — never hand-edit them.
+
+name: Aether-Mail
+options:
+  bundleIdPrefix: com.aether
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+
+packages:
+  EmailKit:
+    path: EmailKit
+
+targets:
+  Aether-Mail:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Aether-Mail
+        excludes:
+          - "Info.plist"
+          - "Aether-Mail.entitlements"
+    dependencies:
+      - package: EmailKit
+    info:
+      path: Aether-Mail/Info.plist
+      properties:
+        CFBundleDisplayName: Aether Mail
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSHumanReadableCopyright: Aether AI Hub
+        NSFaceIDUsageDescription: Aether Mail uses Face ID to unlock your stored mail account credentials.
+        # Proton Mail Bridge / a Mac running big models can live on the LAN.
+        NSLocalNetworkUsageDescription: Aether Mail connects to mail servers and, for AI, a Mac on your local network.
+        UILaunchScreen:
+          UIColorName: ""
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    entitlements:
+      path: Aether-Mail/Aether-Mail.entitlements
+      properties: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aether.mail
+        PRODUCT_NAME: Aether Mail
+        PRODUCT_MODULE_NAME: AetherMail
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        DEVELOPMENT_TEAM: RH5VT77Z5T
+        CODE_SIGN_STYLE: Automatic
+
+schemes:
+  Aether-Mail:
+    build:
+      targets:
+        Aether-Mail: all
+    run:
+      config: Debug
