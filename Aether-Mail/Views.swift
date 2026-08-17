@@ -1,49 +1,184 @@
 import SwiftUI
 import EmailKit
 
-/// Root navigation. iPhone gets a stack (list → reading); iPad naturally widens
-/// the same NavigationStack. A split view + Copilot tab come with the AI work.
+// MARK: - Root
+
 struct RootView: View {
     @Environment(MailStore.self) private var store
 
     var body: some View {
         @Bindable var store = store
-        NavigationStack {
-            InboxView()
-                .navigationTitle("All Inboxes")
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        if store.unreadCount > 0 {
-                            Text("\(store.unreadCount) unread").font(.caption).foregroundStyle(.secondary)
+        Group {
+            if store.accounts.isEmpty {
+                OnboardingView()
+            } else {
+                NavigationStack {
+                    InboxView()
+                        .navigationTitle("All Inboxes")
+                        .toolbar {
+                            ToolbarItem(placement: .topBarLeading) {
+                                NavigationLink { AccountsView() } label: { Image(systemName: "person.2.circle") }
+                            }
+                            ToolbarItem(placement: .topBarTrailing) {
+                                if store.isSyncing { ProgressView() }
+                                else { Button { store.refresh() } label: { Image(systemName: "arrow.clockwise") } }
+                            }
                         }
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button { store.isAddingAccount = true } label: {
-                            Image(systemName: "person.crop.circle.badge.plus")
-                        }
-                    }
                 }
-                .sheet(isPresented: $store.isAddingAccount) { AddMailboxView() }
+            }
+        }
+        .sheet(isPresented: $store.isAddingAccount) { AddMailboxView() }
+        .overlay(alignment: .bottom) {
+            if let banner = store.banner {
+                Text(banner)
+                    .font(.footnote).padding(12)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .padding()
+                    .onTapGesture { store.banner = nil }
+                    .task { try? await Task.sleep(for: .seconds(5)); store.banner = nil }
+            }
         }
     }
 }
+
+// MARK: - Onboarding
+
+struct OnboardingView: View {
+    @Environment(MailStore.self) private var store
+
+    var body: some View {
+        VStack(spacing: 22) {
+            Spacer()
+            ZStack {
+                Circle().fill(Color.accentColor.gradient).frame(width: 96, height: 96)
+                Image(systemName: "envelope.fill").font(.system(size: 42)).foregroundStyle(.white)
+            }
+            VStack(spacing: 8) {
+                Text("Aether Mail").font(.largeTitle).bold()
+                Text("Private, AI-native email — your mail talks straight to your providers, and the AI stays on your devices.")
+                    .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+            Spacer()
+            Button { store.isAddingAccount = true } label: {
+                Text("Add your first mailbox").fontWeight(.semibold).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent).controlSize(.large).padding(.horizontal, 24)
+            Text("iCloud, Gmail, Outlook, or any IMAP server. Use an app-specific password.")
+                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                .padding(.horizontal, 32).padding(.bottom, 24)
+        }
+    }
+}
+
+// MARK: - Add mailbox
+
+struct AddMailboxView: View {
+    @Environment(MailStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var provider: MailProvider = .icloud
+    @State private var email = ""
+    @State private var password = ""
+    @State private var customHost = ""
+    @State private var connecting = false
+    @State private var error: String?
+
+    /// Proton needs the local Bridge (a Mac), so it's not offered on iOS.
+    private let providers: [MailProvider] = [.icloud, .gmail, .outlook, .custom]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Provider") {
+                    Picker("Provider", selection: $provider) {
+                        ForEach(providers) { p in Text(p.displayName).tag(p) }
+                    }
+                    if provider == .custom {
+                        TextField("IMAP host (imap.example.com)", text: $customHost)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    }
+                }
+                Section("Sign in") {
+                    TextField("Email", text: $email)
+                        .textContentType(.emailAddress).keyboardType(.emailAddress)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    SecureField("App-specific password", text: $password)
+                }
+                if provider == .gmail || provider == .outlook {
+                    Section {
+                        Text("Gmail/Outlook need an **app-specific password** (with 2-factor enabled), not your normal password. Full OAuth sign-in is coming.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if let error {
+                    Section { Text(error).font(.callout).foregroundStyle(.red) }
+                }
+            }
+            .navigationTitle("Add Mailbox")
+            .navigationBarTitleDisplayMode(.inline)
+            .interactiveDismissDisabled(connecting)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }.disabled(connecting)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if connecting { ProgressView() }
+                    else {
+                        Button("Connect") { connect() }
+                            .disabled(email.isEmpty || password.isEmpty)
+                    }
+                }
+            }
+        }
+    }
+
+    private func connect() {
+        error = nil
+        connecting = true
+        Task {
+            let result = await store.addAccount(provider: provider, email: email, password: password, customHost: customHost)
+            connecting = false
+            if let result { error = result } else { dismiss() }
+        }
+    }
+}
+
+// MARK: - Inbox
 
 struct InboxView: View {
     @Environment(MailStore.self) private var store
 
     var body: some View {
-        List(store.inbox) { m in
-            NavigationLink {
-                ReadingView(message: m).onAppear { store.markRead(m) }
-            } label: {
-                MessageRow(message: m)
+        List {
+            if store.unreadCount > 0 {
+                Section { EmptyView() } header: {
+                    Text("\(store.unreadCount) unread").textCase(nil)
+                }
+            }
+            ForEach(store.inbox) { m in
+                NavigationLink { ReadingView(message: m) } label: { MessageRow(message: m) }
             }
         }
         .listStyle(.plain)
+        .refreshable { await refreshAsync() }
+        .overlay {
+            if store.inbox.isEmpty && !store.isSyncing {
+                ContentUnavailableView("Inbox empty", systemImage: "tray",
+                                       description: Text("Pull to refresh, or add another mailbox."))
+            }
+        }
+    }
+
+    private func refreshAsync() async {
+        store.refresh()
+        // let the spinner show briefly
+        try? await Task.sleep(for: .milliseconds(400))
     }
 }
 
 struct MessageRow: View {
+    @Environment(MailStore.self) private var store
     let message: MailMessage
 
     var body: some View {
@@ -53,7 +188,7 @@ struct MessageRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text(message.from.first?.shortLabel ?? "Unknown")
-                        .fontWeight(message.isUnread ? .bold : .semibold)
+                        .fontWeight(store.isUnread(message) ? .bold : .semibold)
                     Spacer()
                     if let d = message.date {
                         Text(d.formatted(.relative(presentation: .named)))
@@ -62,10 +197,12 @@ struct MessageRow: View {
                 }
                 Text(message.subject.isEmpty ? "(no subject)" : message.subject)
                     .font(.subheadline).lineLimit(1)
-                    .foregroundStyle(message.isUnread ? .primary : .secondary)
-                Text(message.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    .foregroundStyle(store.isUnread(message) ? .primary : .secondary)
+                if !message.snippet.isEmpty {
+                    Text(message.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
             }
-            if message.isUnread {
+            if store.isUnread(message) {
                 Circle().fill(.tint).frame(width: 8, height: 8).padding(.top, 6)
             }
         }
@@ -77,7 +214,10 @@ struct MessageRow: View {
     }
 }
 
+// MARK: - Reading
+
 struct ReadingView: View {
+    @Environment(MailStore.self) private var store
     let message: MailMessage
 
     var body: some View {
@@ -102,51 +242,57 @@ struct ReadingView: View {
                     }
                 }
                 Divider()
-                // Milestone 2: fetch + render the full MIME body here.
-                Text(message.snippet).font(.body)
+                bodyView
                 Spacer(minLength: 40)
             }
             .padding()
         }
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { store.open(message) }
+    }
+
+    @ViewBuilder private var bodyView: some View {
+        if let body = store.body(for: message) {
+            Text(body.bestText.isEmpty ? message.snippet : body.bestText)
+                .font(.body).textSelection(.enabled)
+        } else {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Loading…").foregroundStyle(.secondary)
+            }
+        }
     }
 }
 
-struct AddMailboxView: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var email = ""
-    @State private var password = ""
-    @State private var provider: MailProvider = .icloud
+// MARK: - Accounts
+
+struct AccountsView: View {
+    @Environment(MailStore.self) private var store
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Account") {
-                    Picker("Provider", selection: $provider) {
-                        ForEach(MailProvider.allCases) { p in
-                            Text(p.rawValue.capitalized).tag(p)
+        List {
+            Section("Mailboxes") {
+                ForEach(store.accounts) { a in
+                    HStack {
+                        Image(systemName: "envelope.circle.fill").foregroundStyle(.tint)
+                        VStack(alignment: .leading) {
+                            Text(a.emailAddress)
+                            Text(a.provider.displayName).font(.caption).foregroundStyle(.secondary)
                         }
+                        Spacer()
+                        Text("\(store.messagesByAccount[a.id]?.count ?? 0)")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    TextField("Email", text: $email)
-                        .textContentType(.emailAddress)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.emailAddress)
-                    SecureField("App-specific password", text: $password)
                 }
-                Section {
-                    Text("The mail engine (EmailKit) is already shared with the Mac app. Live IMAP sign-in is the next milestone.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                .onDelete { idx in idx.map { store.accounts[$0] }.forEach(store.removeAccount) }
             }
-            .navigationTitle("Add Mailbox")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Connect") { dismiss() }
-                        .disabled(email.isEmpty || password.isEmpty)
+            Section {
+                Button { store.isAddingAccount = true } label: {
+                    Label("Add another mailbox", systemImage: "plus")
                 }
             }
         }
+        .navigationTitle("Accounts")
+        .toolbar { EditButton() }
     }
 }

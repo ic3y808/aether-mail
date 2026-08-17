@@ -2,57 +2,184 @@ import Foundation
 import Observation
 import EmailKit
 
-/// App state for Aether Mail. Holds accounts + messages using the shared EmailKit
-/// models, so the iOS UI and the macOS Courier client speak the exact same types.
-///
-/// Milestone 1 (this scaffold): the UI shell renders EmailKit `MailMessage`s.
-/// Next milestone: live IMAP over `EmailKit.IMAPClient` — connect → login →
-/// select("INBOX") → fetchSummaries, and reading via fetchRawMessage → MIME parse,
-/// mirroring Aether-Courier's `MailService`. AI comes after that (on-device →
-/// Mac → cloud), with private endpoints kept out of any public export.
+/// Real multi-account state for Aether Mail. Accounts persist to UserDefaults;
+/// their passwords live in the Keychain. Mail flows over the shared EmailKit
+/// engine (IMAP over Network.framework) — the exact same code the macOS client
+/// uses. AI routing (on-device → Mac → cloud) layers in after this.
 @MainActor @Observable
 final class MailStore {
-    var messages: [MailMessage] = []
-    var selectedID: String?
+    private(set) var accounts: [MailAccount] = []
+    var messagesByAccount: [UUID: [MailMessage]] = [:]
+    var openBodies: [String: MailBody] = [:]     // message id → parsed body (observed)
+    var readIDs: Set<String> = []                // locally-marked-read this session
+
     var isAddingAccount = false
+    var isSyncing = false
+    var banner: String?
 
-    /// Inbox newest-first for the list.
+    private static let accountsKey = "com.aether.mail.accounts.v1"
+
+    init() {
+        load()
+        isAddingAccount = accounts.isEmpty        // onboarding when there are none
+        if !accounts.isEmpty { refresh() }
+    }
+
+    // MARK: - Derived
+
+    var enabledAccounts: [MailAccount] { accounts.filter(\.isEnabled).sorted { $0.sortIndex < $1.sortIndex } }
+
     var inbox: [MailMessage] {
-        messages.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+        enabledAccounts.flatMap { messagesByAccount[$0.id] ?? [] }
+            .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
     }
-    var unreadCount: Int { messages.filter(\.isUnread).count }
+    var unreadCount: Int { inbox.filter { isUnread($0) }.count }
 
-    init() { seedPreview() }
+    func account(for m: MailMessage) -> MailAccount? { accounts.first { $0.id == m.accountID } }
+    func isUnread(_ m: MailMessage) -> Bool { m.isUnread && !readIDs.contains(m.id) }
+    func body(for m: MailMessage) -> MailBody? { openBodies[m.id] }
 
-    func markRead(_ m: MailMessage) {
-        guard let i = messages.firstIndex(where: { $0.id == m.id }) else { return }
-        messages[i].flags.insert(.seen)
+    // MARK: - Persistence
+
+    private func load() {
+        guard let data = UserDefaults.standard.data(forKey: Self.accountsKey),
+              let saved = try? JSONDecoder().decode([MailAccount].self, from: data) else { return }
+        accounts = saved
     }
-
-    // MARK: - Placeholder data (until the live IMAP path lands)
-
-    private func seedPreview() {
-        let account = UUID()
-        func msg(_ uid: UInt32, _ name: String, _ addr: String, _ subject: String,
-                 _ snippet: String, minsAgo: Double, unread: Bool) -> MailMessage {
-            MailMessage(uid: uid, folderPath: "INBOX", accountID: account,
-                        subject: subject,
-                        from: [MailAddress(name: name, address: addr)],
-                        date: Date().addingTimeInterval(-minsAgo * 60),
-                        flags: unread ? [] : [.seen],
-                        snippet: snippet)
+    private func persist() {
+        if let data = try? JSONEncoder().encode(accounts) {
+            UserDefaults.standard.set(data, forKey: Self.accountsKey)
         }
-        messages = [
-            msg(5, "Orbit CI", "builds@orbit-ci.dev", "Your release build passed ✓",
-                "v0.1.8 signed & notarized — the .dmg is ready to download.", minsAgo: 8, unread: true),
-            msg(4, "Ledger", "receipts@ledger.app", "Your July statement is ready",
-                "Receipt · $12.00 · view or download your invoice.", minsAgo: 55, unread: true),
-            msg(3, "Vela Design", "aisha@vela.design", "Q3 Brand Kit shared with you",
-                "You now have access to the shared library.", minsAgo: 140, unread: false),
-            msg(2, "Northwind Travel", "trips@northwind.travel", "Itinerary: SFO → LHR",
-                "Check-in opens 24 hours before departure.", minsAgo: 1500, unread: false),
-            msg(1, "Cadence", "digest@cadence.app", "Weekly digest — 3 threads need you",
-                "A summary of what moved this week across your projects.", minsAgo: 1600, unread: false),
-        ]
+    }
+
+    // MARK: - Connection (shared recipe)
+
+    private func makeTransport(_ ep: ServerEndpoint) -> MailTransport {
+        ep.security == .startTLS ? STARTTLSTransport(endpoint: ep) : NWConnectionTransport(endpoint: ep)
+    }
+
+    private func openIMAP(_ imap: ServerEndpoint, email: String, password: String) async throws -> IMAPClient {
+        let client = IMAPClient(transport: makeTransport(imap))
+        try await client.connect()
+        if imap.security == .startTLS { try await client.startTLS() }
+        try await client.login(user: email, password: password.filter { !$0.isWhitespace && $0 != "-" })
+        return client
+    }
+
+    // MARK: - Add / remove account
+
+    /// Validates + saves an account, then syncs it. Returns an error string on
+    /// failure, or nil on success.
+    func addAccount(provider: MailProvider, email rawEmail: String, password: String, customHost: String) async -> String? {
+        let email = rawEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard email.contains("@") else { return "Enter a valid email address." }
+
+        let imap: ServerEndpoint
+        if provider == .custom {
+            let host = customHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !host.isEmpty else { return "Enter your IMAP server host (e.g. imap.example.com)." }
+            imap = ServerEndpoint(host: host, port: 993, security: .implicitTLS)
+        } else {
+            imap = ProviderCatalog.imap(for: provider)
+        }
+
+        do {
+            let client = try await openIMAP(imap, email: email, password: password)
+            _ = try await client.select("INBOX")
+            await client.disconnect()
+        } catch {
+            return friendly(error)
+        }
+
+        let ref = "mail-\(email)-\(UUID().uuidString)"
+        Keychain.set(password.filter { !$0.isWhitespace && $0 != "-" }, for: ref)
+        let smtp = provider == .custom
+            ? ServerEndpoint(host: imap.host.replacingOccurrences(of: "imap", with: "smtp"), port: 587, security: .startTLS)
+            : ProviderCatalog.smtp(for: provider)
+        let account = MailAccount(provider: provider, emailAddress: email, displayName: email,
+                                  imap: imap, smtp: smtp, credentialRef: ref, sortIndex: accounts.count)
+        accounts.append(account)
+        persist()
+        await sync(account)
+        return nil
+    }
+
+    func removeAccount(_ account: MailAccount) {
+        Keychain.delete(account.credentialRef)
+        accounts.removeAll { $0.id == account.id }
+        messagesByAccount[account.id] = nil
+        persist()
+    }
+
+    // MARK: - Sync
+
+    func sync(_ account: MailAccount) async {
+        guard let password = Keychain.getString(account.credentialRef) else { return }
+        do {
+            let client = try await openIMAP(account.imap, email: account.emailAddress, password: password)
+            _ = try await client.select("INBOX")
+            let uids = try await client.uidSearch("ALL")
+            let recent = Array(uids.suffix(60))            // newest 60
+            if recent.isEmpty { messagesByAccount[account.id] = []; await client.disconnect(); return }
+            let set = recent.map(String.init).joined(separator: ",")
+            let fetched = try await client.fetchSummaries(uidSet: set)
+            await client.disconnect()
+            messagesByAccount[account.id] = fetched.map { m in
+                var m = m; m.accountID = account.id; m.folderPath = "INBOX"; return m
+            }
+        } catch {
+            banner = "Couldn't sync \(account.emailAddress) — \(friendly(error))"
+        }
+    }
+
+    func refresh() {
+        Task {
+            isSyncing = true
+            for a in enabledAccounts { await sync(a) }
+            isSyncing = false
+        }
+    }
+
+    // MARK: - Reading
+
+    func open(_ m: MailMessage) {
+        readIDs.insert(m.id)                                // local mark-read
+        Task { await loadBody(m) }
+        if m.isUnread, let account = account(for: m), let pw = Keychain.getString(account.credentialRef) {
+            Task {                                          // best-effort \Seen on the server
+                if let client = try? await openIMAP(account.imap, email: account.emailAddress, password: pw) {
+                    _ = try? await client.select(m.folderPath)
+                    try? await client.store(uid: m.uid, flag: "\\Seen", add: true)
+                    await client.disconnect()
+                }
+            }
+        }
+    }
+
+    private func loadBody(_ m: MailMessage) async {
+        guard openBodies[m.id] == nil, let account = account(for: m),
+              let password = Keychain.getString(account.credentialRef) else { return }
+        do {
+            let client = try await openIMAP(account.imap, email: account.emailAddress, password: password)
+            _ = try await client.select(m.folderPath)
+            let raw = try await client.fetchRawMessage(uid: m.uid)
+            await client.disconnect()
+            openBodies[m.id] = MIMEMessageParser.parse(raw)
+        } catch {
+            openBodies[m.id] = MailBody(plainText: "Couldn't load this message.\n\n\(friendly(error))")
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func friendly(_ error: Error) -> String {
+        let s = "\(error)".lowercased()
+        if s.contains("auth") || s.contains("login") || s.contains("credential") {
+            return "Sign-in failed — check the email and app-specific password."
+        }
+        if s.contains("host") || s.contains("connect") || s.contains("timed out") || s.contains("network") {
+            return "Couldn't reach the server. Check the host and your connection."
+        }
+        return error.localizedDescription
     }
 }

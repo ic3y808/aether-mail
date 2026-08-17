@@ -15,8 +15,8 @@
 ---
 
 > ### 🚧 Early / work‑in‑progress
-> **Milestone 1 (now):** the app builds and runs on the iOS Simulator — inbox list, reading view, add‑mailbox form — on the shared **EmailKit** engine.
-> **Next:** live IMAP sign‑in over `EmailKit.IMAPClient`, then the tiered on‑device/Mac/cloud AI. Placeholder inbox data for now.
+> **Now:** onboarding + **multiple real accounts** over live IMAP (`EmailKit`) — add iCloud / Gmail / Outlook / any IMAP host with an app‑specific password, and it fetches your actual inbox. Unified inbox, reading (MIME‑parsed bodies), per‑account management. Credentials live in the Keychain.
+> **Next:** OAuth sign‑in (Gmail/Outlook), IMAP IDLE push, and the tiered on‑device → Mac → cloud AI.
 
 ## Why
 
