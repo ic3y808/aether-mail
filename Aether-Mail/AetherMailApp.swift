@@ -11,7 +11,8 @@ struct AetherMailApp: App {
         WindowGroup {
             RootView()
                 .environment(store)
-                .tint(Color(red: 0.60, green: 0.38, blue: 0.96))   // Aether violet
+                .tint(.aetherViolet)
+                .preferredColorScheme(.dark)   // the aurora-glass look is dark-first
         }
     }
 }

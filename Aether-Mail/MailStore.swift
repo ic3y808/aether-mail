@@ -11,7 +11,9 @@ final class MailStore {
     private(set) var accounts: [MailAccount] = []
     var messagesByAccount: [UUID: [MailMessage]] = [:]
     var openBodies: [String: MailBody] = [:]     // message id → parsed body (observed)
+    var summaries: [String: String] = [:]        // message id → on-device AI summary
     var readIDs: Set<String> = []                // locally-marked-read this session
+    @ObservationIgnored private var summarizing: Set<String> = []
 
     var isAddingAccount = false
     var isSyncing = false
@@ -21,6 +23,7 @@ final class MailStore {
 
     init() {
         load()
+        WatchBridge.shared.activate()             // start the paired-watch link
         isAddingAccount = accounts.isEmpty        // onboarding when there are none
         if !accounts.isEmpty { refresh() }
     }
@@ -217,14 +220,22 @@ final class MailStore {
             isSyncing = true
             for a in enabledAccounts { await sync(a) }
             isSyncing = false
+            WatchBridge.shared.sync(from: self)   // mirror the fresh inbox to the watch
         }
     }
 
     // MARK: - Reading
 
+    var aiAvailable: Bool { MailAI.isAvailable }
+    func summary(for id: String) -> String? { summaries[id] }
+
     func open(_ m: MailMessage) {
         readIDs.insert(m.id)                                // local mark-read
-        Task { await loadBody(m) }
+        WatchBridge.shared.sync(from: self)                 // unread count changed
+        Task {
+            await loadBody(m)
+            await summarizeIfNeeded(m)                       // on-device AI summary
+        }
         if m.isUnread, let account = account(for: m) {
             Task {                                          // best-effort \Seen on the server
                 if let client = try? await openIMAP(for: account) {
@@ -247,6 +258,25 @@ final class MailStore {
         } catch {
             openBodies[m.id] = MailBody(plainText: "Couldn't load this message.\n\n\(friendly(error))")
         }
+    }
+
+    private func summarizeIfNeeded(_ m: MailMessage) async {
+        guard MailAI.isAvailable, summaries[m.id] == nil, !summarizing.contains(m.id) else { return }
+        summarizing.insert(m.id)
+        defer { summarizing.remove(m.id) }
+        let body = openBodies[m.id]?.bestText ?? m.snippet
+        if let s = await MailAI.summarize(subject: m.subject,
+                                          from: m.from.first?.shortLabel ?? "unknown", body: body) {
+            summaries[m.id] = s
+            WatchBridge.shared.sync(from: self)   // push the new summary to the watch
+        }
+    }
+
+    /// Answer a free-form question about an open email, on-device.
+    func ask(_ question: String, about m: MailMessage) async -> String? {
+        let body = openBodies[m.id]?.bestText ?? m.snippet
+        return await MailAI.ask(question, subject: m.subject,
+                                from: m.from.first?.shortLabel ?? "unknown", body: body)
     }
 
     // MARK: - Helpers

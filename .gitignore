@@ -2,6 +2,7 @@
 *.xcodeproj/
 Aether-Mail/Info.plist
 Aether-Mail/Aether-Mail.entitlements
+WatchApp/Info.plist
 # Swift / Xcode build output
 .build/
 DerivedData/
