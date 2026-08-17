@@ -106,7 +106,7 @@ final class MailStore {
     /// "Sign in with Google / Microsoft": runs the OAuth flow, validates over
     /// XOAUTH2, then saves. `email` is the mailbox this account is for.
     func addOAuthAccount(provider: MailProvider, email rawEmail: String) async -> String? {
-        let email = rawEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let email = normalizeEmail(rawEmail, provider)
         guard email.contains("@") else { return "Enter your email address first." }
         guard let config = OAuthClients.config(for: provider) else {
             return "\(provider.displayName) sign-in isn't configured in this build."
@@ -143,7 +143,7 @@ final class MailStore {
     /// Validates + saves an account, then syncs it. Returns an error string on
     /// failure, or nil on success.
     func addAccount(provider: MailProvider, email rawEmail: String, password: String, customHost: String) async -> String? {
-        let email = rawEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let email = normalizeEmail(rawEmail, provider)
         guard email.contains("@") else { return "Enter a valid email address." }
 
         let imap: ServerEndpoint
@@ -241,6 +241,20 @@ final class MailStore {
     }
 
     // MARK: - Helpers
+
+    /// Accept a bare user id for providers with a fixed domain (Gmail → @gmail.com,
+    /// iCloud → @icloud.com).
+    private func normalizeEmail(_ raw: String, _ provider: MailProvider) -> String {
+        var e = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !e.contains("@") {
+            switch provider {
+            case .gmail:  e += "@gmail.com"
+            case .icloud: e += "@icloud.com"
+            default:      break
+            }
+        }
+        return e
+    }
 
     private func friendly(_ error: Error) -> String {
         let s = "\(error)".lowercased()
