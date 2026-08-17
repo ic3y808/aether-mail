@@ -101,9 +101,10 @@ struct AddMailboxView: View {
                 }
                 Section("Sign in") {
                     TextField("Email", text: $email)
-                        .textContentType(.emailAddress).keyboardType(.emailAddress)
+                        .textContentType(.username).keyboardType(.emailAddress)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                     SecureField("App-specific password", text: $password)
+                        .textContentType(.password)   // surfaces iCloud Keychain autofill
                 }
                 if provider == .gmail || provider == .outlook {
                     Section {
