@@ -62,8 +62,16 @@ final class MailStore {
         let client = IMAPClient(transport: makeTransport(imap))
         try await client.connect()
         if imap.security == .startTLS { try await client.startTLS() }
-        try await client.login(user: email, password: password.filter { !$0.isWhitespace && $0 != "-" })
+        try await client.login(user: email, password: password)   // caller has normalized it
         return client
+    }
+
+    /// Apple shows app-specific passwords as `xxxx-xxxx-xxxx-xxxx`, but iCloud
+    /// wants the 16 characters WITHOUT the dashes. Other providers may have real
+    /// dashes in the password, so only strip them for iCloud.
+    private func normalizedPassword(_ password: String, _ provider: MailProvider) -> String {
+        let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        return provider == .icloud ? trimmed.filter { $0 != "-" && !$0.isWhitespace } : trimmed
     }
 
     /// Connect + authenticate for a saved account — password OR OAuth (XOAUTH2).
@@ -155,8 +163,9 @@ final class MailStore {
             imap = ProviderCatalog.imap(for: provider)
         }
 
+        let pw = normalizedPassword(password, provider)
         do {
-            let client = try await openIMAP(imap, email: email, password: password)
+            let client = try await openIMAP(imap, email: email, password: pw)
             _ = try await client.select("INBOX")
             await client.disconnect()
         } catch {
@@ -164,7 +173,7 @@ final class MailStore {
         }
 
         let ref = "mail-\(email)-\(UUID().uuidString)"
-        Keychain.set(password.filter { !$0.isWhitespace && $0 != "-" }, for: ref)
+        Keychain.set(pw, for: ref)
         let smtp = provider == .custom
             ? ServerEndpoint(host: imap.host.replacingOccurrences(of: "imap", with: "smtp"), port: 587, security: .startTLS)
             : ProviderCatalog.smtp(for: provider)
