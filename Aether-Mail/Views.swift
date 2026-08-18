@@ -18,6 +18,9 @@ struct RootView: View {
                         .navigationTitle("All Inboxes")
                         .toolbar {
                             ToolbarItem(placement: .topBarLeading) {
+                                NavigationLink { MailboxesView() } label: { Image(systemName: "tray.2") }
+                            }
+                            ToolbarItem(placement: .topBarLeading) {
                                 NavigationLink { AccountsView() } label: { Image(systemName: "person.2.circle") }
                             }
                             ToolbarItem(placement: .topBarTrailing) {
@@ -78,6 +81,11 @@ struct InboxView: View {
 
     var body: some View {
         List {
+            ForEach(store.accounts.filter { store.syncState[$0.id]?.errorText != nil }) { account in
+                SyncErrorRow(account: account)
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 14, bottom: 4, trailing: 14))
+            }
             if store.aiAvailable {
                 Label("On-device AI ready — summaries run on your iPhone", systemImage: "sparkles")
                     .font(.caption).foregroundStyle(.secondary)
@@ -97,11 +105,35 @@ struct InboxView: View {
         .scrollContentBackground(.hidden)
         .refreshable { store.refresh(); try? await Task.sleep(for: .milliseconds(500)) }
         .overlay {
-            if store.inbox.isEmpty && !store.isSyncing {
+            if store.inbox.isEmpty && !store.isSyncing && !store.hasSyncErrors {
                 ContentUnavailableView("Inbox empty", systemImage: "tray",
                                        description: Text("Pull to refresh, or add another mailbox."))
             }
         }
+    }
+}
+
+/// A tappable red strip explaining why an account didn't sync — so a failure is
+/// visible and retryable instead of a banner that vanishes after five seconds.
+struct SyncErrorRow: View {
+    @Environment(MailStore.self) private var store
+    let account: MailAccount
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(account.emailAddress).font(.subheadline).fontWeight(.semibold)
+                Text(store.syncState[account.id]?.errorText ?? "Couldn't sync.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 6)
+            Button("Retry") { Task { await store.sync(account) } }
+                .font(.caption).buttonStyle(.bordered).controlSize(.small)
+        }
+        .padding(12)
+        .background(.orange.opacity(0.14), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.orange.opacity(0.35)))
     }
 }
 
@@ -269,6 +301,87 @@ struct ReadingView: View {
     }
 }
 
+// MARK: - Mailboxes (folders)
+
+/// Every account and its IMAP folders, drilling into a folder's messages —
+/// the iOS take on the macOS client's mailbox sidebar.
+struct MailboxesView: View {
+    @Environment(MailStore.self) private var store
+
+    var body: some View {
+        List {
+            ForEach(store.enabledAccounts) { account in
+                Section {
+                    ForEach(store.foldersByAccount[account.id] ?? []) { folder in
+                        NavigationLink {
+                            FolderMessagesView(account: account, folder: folder)
+                        } label: {
+                            Label {
+                                Text(folder.role == .inbox ? "Inbox" : folder.displayName)
+                            } icon: {
+                                Image(systemName: folder.role.icon).foregroundStyle(account.provider.tint)
+                            }
+                        }
+                        .listRowBackground(Color.white.opacity(0.05))
+                    }
+                    if store.foldersByAccount[account.id] == nil {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading folders…").font(.caption).foregroundStyle(.secondary)
+                        }
+                        .listRowBackground(Color.clear)
+                    }
+                } header: {
+                    HStack(spacing: 8) {
+                        ProviderBadge(provider: account.provider, size: 22)
+                        Text(account.emailAddress).textCase(nil)
+                    }
+                }
+                .task { await store.loadFolders(account) }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background { AuroraBackdrop(intensity: 0.6) }
+        .navigationTitle("Mailboxes")
+    }
+}
+
+/// The message list for one account's folder (Sent, Archive, a label, etc.).
+struct FolderMessagesView: View {
+    @Environment(MailStore.self) private var store
+    let account: MailAccount
+    let folder: MailFolder
+
+    private var messages: [MailMessage] { store.messages(account.id, folder.path) }
+
+    var body: some View {
+        List {
+            ForEach(messages) { m in
+                ZStack {
+                    MessageRow(message: m).padding(12).glassCard(16)
+                    NavigationLink { ReadingView(message: m) } label: { EmptyView() }.opacity(0)
+                }
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 4, leading: 14, bottom: 4, trailing: 14))
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background { AuroraBackdrop(intensity: 0.6) }
+        .overlay {
+            if messages.isEmpty {
+                ContentUnavailableView("No messages", systemImage: folder.role.icon,
+                                       description: Text("This folder is empty or still loading."))
+            }
+        }
+        .refreshable { await store.syncFolder(account, folder.path) }
+        .task { if messages.isEmpty { await store.syncFolder(account, folder.path) } }
+        .navigationTitle(folder.role == .inbox ? "Inbox" : folder.displayName)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
 // MARK: - Accounts
 
 struct AccountsView: View {
@@ -276,19 +389,12 @@ struct AccountsView: View {
 
     var body: some View {
         List {
-            Section("Mailboxes") {
-                ForEach(store.accounts) { a in
-                    HStack {
-                        Image(systemName: "envelope.circle.fill").foregroundStyle(LinearGradient.aether)
-                        VStack(alignment: .leading) {
-                            Text(a.emailAddress)
-                            Text(a.provider.displayName).font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Text("\(store.messagesByAccount[a.id]?.count ?? 0)")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    .listRowBackground(Color.white.opacity(0.05))
+            Section {
+                ForEach(store.accounts) { account in
+                    AccountCard(account: account)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
                 }
                 .onDelete { idx in idx.map { store.accounts[$0] }.forEach(store.removeAccount) }
             }
@@ -296,13 +402,55 @@ struct AccountsView: View {
                 Button { store.isAddingAccount = true } label: {
                     Label("Add another mailbox", systemImage: "plus")
                 }
-                .listRowBackground(Color.white.opacity(0.05))
+                .listRowBackground(Color.white.opacity(0.06))
             }
         }
+        .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background { AuroraBackdrop(intensity: 0.6) }
         .navigationTitle("Accounts")
         .toolbar { EditButton() }
+    }
+}
+
+/// A glass account tile: provider badge, address, provider name, live status,
+/// and the inbox count — matching the macOS Courier account rows.
+struct AccountCard: View {
+    @Environment(MailStore.self) private var store
+    let account: MailAccount
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ProviderBadge(provider: account.provider, size: 42)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(account.emailAddress).fontWeight(.semibold).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(account.provider.displayName)
+                    statusView
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 6)
+            let count = store.messagesByAccount[account.id]?.count ?? 0
+            if count > 0 {
+                Text("\(count)").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(12).glassCard(16)
+    }
+
+    @ViewBuilder private var statusView: some View {
+        switch store.syncState[account.id] {
+        case .syncing:
+            HStack(spacing: 4) { ProgressView().controlSize(.mini); Text("Syncing…") }
+        case .failed(let reason):
+            Label(reason, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange).lineLimit(1)
+        case .ok:
+            Label("Up to date", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+        default:
+            EmptyView()
+        }
     }
 }
 

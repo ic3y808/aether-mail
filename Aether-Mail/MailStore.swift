@@ -9,11 +9,20 @@ import EmailKit
 @MainActor @Observable
 final class MailStore {
     private(set) var accounts: [MailAccount] = []
-    var messagesByAccount: [UUID: [MailMessage]] = [:]
+    var messagesByAccount: [UUID: [MailMessage]] = [:]   // INBOX per account (All Inboxes)
+    var messagesByFolder: [String: [MailMessage]] = [:]  // any folder, key = accountID⋯path
+    var foldersByAccount: [UUID: [MailFolder]] = [:]     // IMAP folder list per account
     var openBodies: [String: MailBody] = [:]     // message id → parsed body (observed)
     var summaries: [String: String] = [:]        // message id → on-device AI summary
     var readIDs: Set<String> = []                // locally-marked-read this session
+    var syncState: [UUID: SyncState] = [:]       // per-account sync status (shown in UI)
     @ObservationIgnored private var summarizing: Set<String> = []
+
+    enum SyncState: Equatable {
+        case idle, syncing, ok
+        case failed(String)
+        var errorText: String? { if case .failed(let s) = self { return s } else { return nil } }
+    }
 
     var isAddingAccount = false
     var isSyncing = false
@@ -37,6 +46,7 @@ final class MailStore {
             .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
     }
     var unreadCount: Int { inbox.filter { isUnread($0) }.count }
+    var hasSyncErrors: Bool { enabledAccounts.contains { syncState[$0.id]?.errorText != nil } }
 
     func account(for m: MailMessage) -> MailAccount? { accounts.first { $0.id == m.accountID } }
     func isUnread(_ m: MailMessage) -> Bool { m.isUnread && !readIDs.contains(m.id) }
@@ -192,26 +202,85 @@ final class MailStore {
         Keychain.delete(account.credentialRef)
         accounts.removeAll { $0.id == account.id }
         messagesByAccount[account.id] = nil
+        foldersByAccount[account.id] = nil
+        syncState[account.id] = nil
+        messagesByFolder = messagesByFolder.filter { !$0.key.hasPrefix(account.id.uuidString) }
         persist()
     }
 
     // MARK: - Sync
 
     func sync(_ account: MailAccount) async {
+        syncState[account.id] = .syncing
         do {
             let client = try await openIMAP(for: account)
             _ = try await client.select("INBOX")
             let uids = try await client.uidSearch("ALL")
             let recent = Array(uids.suffix(60))            // newest 60
-            if recent.isEmpty { messagesByAccount[account.id] = []; await client.disconnect(); return }
+            if recent.isEmpty {
+                messagesByAccount[account.id] = []
+                await client.disconnect()
+                syncState[account.id] = .ok
+                return
+            }
             let set = recent.map(String.init).joined(separator: ",")
             let fetched = try await client.fetchSummaries(uidSet: set)
             await client.disconnect()
             messagesByAccount[account.id] = fetched.map { m in
                 var m = m; m.accountID = account.id; m.folderPath = "INBOX"; return m
             }
+            syncState[account.id] = .ok
         } catch {
+            syncState[account.id] = .failed(friendly(error))
             banner = "Couldn't sync \(account.emailAddress) — \(friendly(error))"
+        }
+    }
+
+    // MARK: - Folders
+
+    /// Stable key for a (account, folder-path) pair.
+    func folderKey(_ account: UUID, _ path: String) -> String { "\(account.uuidString)\u{1}\(path)" }
+
+    /// Messages currently loaded for a specific folder, newest first.
+    func messages(_ account: UUID, _ path: String) -> [MailMessage] {
+        (messagesByFolder[folderKey(account, path)] ?? [])
+            .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+    }
+
+    /// Load the IMAP folder list for an account (used by the Mailboxes screen).
+    func loadFolders(_ account: MailAccount) async {
+        guard foldersByAccount[account.id] == nil else { return }
+        do {
+            let client = try await openIMAP(for: account)
+            let folders = try await client.listFolders()
+            await client.disconnect()
+            foldersByAccount[account.id] = folders
+                .filter(\.isSelectable)
+                .sorted { $0.role.sortRank != $1.role.sortRank
+                    ? $0.role.sortRank < $1.role.sortRank
+                    : $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        } catch {
+            banner = "Couldn't list folders for \(account.emailAddress) — \(friendly(error))"
+        }
+    }
+
+    /// Sync the newest messages of an arbitrary folder into `messagesByFolder`.
+    func syncFolder(_ account: MailAccount, _ path: String) async {
+        do {
+            let client = try await openIMAP(for: account)
+            _ = try await client.select(path)
+            let uids = try await client.uidSearch("ALL")
+            let recent = Array(uids.suffix(60))
+            let key = folderKey(account.id, path)
+            if recent.isEmpty { messagesByFolder[key] = []; await client.disconnect(); return }
+            let set = recent.map(String.init).joined(separator: ",")
+            let fetched = try await client.fetchSummaries(uidSet: set)
+            await client.disconnect()
+            messagesByFolder[key] = fetched.map { m in
+                var m = m; m.accountID = account.id; m.folderPath = path; return m
+            }
+        } catch {
+            banner = "Couldn't open \(path) — \(friendly(error))"
         }
     }
 
