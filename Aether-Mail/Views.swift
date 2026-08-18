@@ -251,17 +251,15 @@ struct ReadingView: View {
     private var bodyCard: some View {
         Group {
             if let body = store.body(for: message) {
-                Text(body.bestText.isEmpty ? message.snippet : body.bestText)
-                    .font(.body).textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                EmailBodyView(content: body)
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Loading…").foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity).padding(16).glassCard(18)
             }
         }
-        .padding(16).glassCard(18)
     }
 
     @ViewBuilder private var askBox: some View {

@@ -290,6 +290,47 @@ final class MailStore {
             for a in enabledAccounts { await sync(a) }
             isSyncing = false
             WatchBridge.shared.sync(from: self)   // mirror the fresh inbox to the watch
+            prefetchInbox()                        // warm bodies + AI summaries in the background
+        }
+    }
+
+    // MARK: - Background prefetch
+
+    /// How many of the newest messages per account to pre-load (body + summary)
+    /// so opening them is instant rather than showing a spinner.
+    private static let prefetchCount = 12
+    @ObservationIgnored private var prefetching = false
+
+    /// After a sync, quietly download the newest message bodies and compute their
+    /// on-device summaries, so by the time the user taps in it's already there.
+    /// Runs at low priority, one message at a time, and skips anything already
+    /// cached — safe to call after every refresh.
+    func prefetchInbox() {
+        guard !prefetching else { return }
+        prefetching = true
+        Task(priority: .utility) {
+            defer { prefetching = false }
+            for account in enabledAccounts {
+                let newest = (messagesByAccount[account.id] ?? [])
+                    .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+                    .prefix(Self.prefetchCount)
+                let needBody = newest.filter { openBodies[$0.id] == nil }
+                if !needBody.isEmpty {                       // one connection for the whole batch
+                    if let client = try? await openIMAP(for: account),
+                       (try? await client.select("INBOX")) != nil {
+                        for m in needBody where openBodies[m.id] == nil {
+                            if let raw = try? await client.fetchRawMessage(uid: m.uid) {
+                                openBodies[m.id] = MIMEMessageParser.parse(raw)
+                            }
+                        }
+                        await client.disconnect()
+                    }
+                }
+                for m in newest where summaries[m.id] == nil {   // on-device AI, paced
+                    await summarizeIfNeeded(m)
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+            }
         }
     }
 
