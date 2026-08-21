@@ -24,6 +24,17 @@ final class MailStore {
         var errorText: String? { if case .failed(let s) = self { return s } else { return nil } }
     }
 
+    /// UIDVALIDITY each folder's cache was fetched under. IMAP UIDs only mean
+    /// anything within one UIDVALIDITY, so when the server changes it the cached
+    /// UIDs are stale and the folder must be re-fetched whole.
+    @ObservationIgnored var uidValidityByFolder: [String: UInt32] = [:]
+    /// True once the disk cache has been restored, so the first sync knows it can
+    /// trust what is already on screen.
+    @ObservationIgnored var cacheRestored = false
+    @ObservationIgnored var cacheSaveTask: Task<Void, Never>?
+    @ObservationIgnored var summarySaveTask: Task<Void, Never>?
+    @ObservationIgnored var backfilling = false
+
     /// Messages awaiting confirmation of an irreversible delete. Non-nil puts
     /// the confirmation sheet on screen.
     var pendingDelete: [MailMessage]?
@@ -47,7 +58,13 @@ final class MailStore {
         load()
         WatchBridge.shared.activate()             // start the paired-watch link
         isAddingAccount = accounts.isEmpty        // onboarding when there are none
-        if !accounts.isEmpty { refresh() }
+        // Paint from disk first, then sync. Going straight to the network showed
+        // an empty inbox for as long as the fetch took, every single launch, for
+        // mail that was already on the device.
+        Task { @MainActor in
+            await restoreCache()
+            if !accounts.isEmpty { refresh() }
+        }
     }
 
     // MARK: - Derived
@@ -218,7 +235,10 @@ final class MailStore {
         foldersByAccount[account.id] = nil
         syncState[account.id] = nil
         messagesByFolder = messagesByFolder.filter { !$0.key.hasPrefix(account.id.uuidString) }
+        uidValidityByFolder = uidValidityByFolder.filter { !$0.key.hasPrefix(account.id.uuidString) }
         persist()
+        let removed = account.id
+        Task { await MailCache.shared.purge(account: removed) }
     }
 
     // MARK: - Sync
@@ -227,22 +247,29 @@ final class MailStore {
         syncState[account.id] = .syncing
         do {
             let client = try await openIMAP(for: account)
-            _ = try await client.select("INBOX")
+            let status = try await client.select("INBOX")
             let uids = try await client.uidSearch("ALL")
             let recent = Array(uids.suffix(60))            // newest 60
             if recent.isEmpty {
                 messagesByAccount[account.id] = []
                 await client.disconnect()
                 syncState[account.id] = .ok
+                saveMessageCache()
                 return
             }
-            let set = recent.map(String.init).joined(separator: ",")
-            let fetched = try await client.fetchSummaries(uidSet: set)
+            let merged = try await mergeIncrementally(
+                client: client,
+                cached: messagesByAccount[account.id] ?? [],
+                key: folderKey(account.id, "INBOX"),
+                serverValidity: status.uidValidity,
+                wantedUIDs: recent,
+                accountID: account.id,
+                path: "INBOX"
+            )
             await client.disconnect()
-            messagesByAccount[account.id] = fetched.map { m in
-                var m = m; m.accountID = account.id; m.folderPath = "INBOX"; return m
-            }
+            messagesByAccount[account.id] = merged
             syncState[account.id] = .ok
+            saveMessageCache()
         } catch {
             syncState[account.id] = .failed(friendly(error))
             banner = "Couldn't sync \(account.emailAddress) — \(friendly(error))"
@@ -281,17 +308,28 @@ final class MailStore {
     func syncFolder(_ account: MailAccount, _ path: String) async {
         do {
             let client = try await openIMAP(for: account)
-            _ = try await client.select(path)
+            let status = try await client.select(path)
             let uids = try await client.uidSearch("ALL")
             let recent = Array(uids.suffix(60))
             let key = folderKey(account.id, path)
-            if recent.isEmpty { messagesByFolder[key] = []; await client.disconnect(); return }
-            let set = recent.map(String.init).joined(separator: ",")
-            let fetched = try await client.fetchSummaries(uidSet: set)
-            await client.disconnect()
-            messagesByFolder[key] = fetched.map { m in
-                var m = m; m.accountID = account.id; m.folderPath = path; return m
+            if recent.isEmpty {
+                messagesByFolder[key] = []
+                await client.disconnect()
+                saveMessageCache()
+                return
             }
+            let merged = try await mergeIncrementally(
+                client: client,
+                cached: messagesByFolder[key] ?? [],
+                key: key,
+                serverValidity: status.uidValidity,
+                wantedUIDs: recent,
+                accountID: account.id,
+                path: path
+            )
+            await client.disconnect()
+            messagesByFolder[key] = merged
+            saveMessageCache()
         } catch {
             banner = "Couldn't open \(path) — \(friendly(error))"
         }
@@ -304,6 +342,7 @@ final class MailStore {
             isSyncing = false
             WatchBridge.shared.sync(from: self)   // mirror the fresh inbox to the watch
             prefetchInbox()                        // warm bodies + AI summaries in the background
+            backfillSummaries()                    // ...then everything else that still lacks one
         }
     }
 
@@ -354,6 +393,7 @@ final class MailStore {
 
     func open(_ m: MailMessage) {
         readIDs.insert(m.id)                                // local mark-read
+        saveMessageCache()                                  // ...and remember it across launches
         WatchBridge.shared.sync(from: self)                 // unread count changed
         Task {
             await loadBody(m)
@@ -370,20 +410,28 @@ final class MailStore {
         }
     }
 
-    private func loadBody(_ m: MailMessage) async {
+    func loadBody(_ m: MailMessage) async {
         guard openBodies[m.id] == nil, let account = account(for: m) else { return }
+        // Already parsed on a previous run? Then there is nothing to fetch.
+        if let cached = await MailCache.shared.body(m.id) {
+            openBodies[m.id] = cached
+            return
+        }
         do {
             let client = try await openIMAP(for: account)
             _ = try await client.select(m.folderPath)
             let raw = try await client.fetchRawMessage(uid: m.uid)
             await client.disconnect()
-            openBodies[m.id] = MIMEMessageParser.parse(raw)
+            let parsed = MIMEMessageParser.parse(raw)
+            openBodies[m.id] = parsed
+            await MailCache.shared.saveBody(parsed, for: m.id)
         } catch {
+            // Not cached — a failure is about this attempt, not about the message.
             openBodies[m.id] = MailBody(plainText: "Couldn't load this message.\n\n\(friendly(error))")
         }
     }
 
-    private func summarizeIfNeeded(_ m: MailMessage) async {
+    func summarizeIfNeeded(_ m: MailMessage) async {
         guard MailAI.isAvailable, summaries[m.id] == nil, !summarizing.contains(m.id) else { return }
         summarizing.insert(m.id)
         defer { summarizing.remove(m.id) }
@@ -391,6 +439,7 @@ final class MailStore {
         if let s = await MailAI.summarize(subject: m.subject,
                                           from: m.from.first?.shortLabel ?? "unknown", body: body) {
             summaries[m.id] = s
+            saveSummaryCache()
             WatchBridge.shared.sync(from: self)   // push the new summary to the watch
         }
     }

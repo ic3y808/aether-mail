@@ -100,6 +100,8 @@ extension MailStore {
         var grouped: [UUID: [String: [MailMessage]]] = [:]
         for m in messages { grouped[m.accountID, default: [:]][m.folderPath, default: []].append(m) }
         for m in messages { removeLocal(m) }
+        let ids = messages.map(\.id)
+        Task { for id in ids { await MailCache.shared.removeBody(for: id) } }
 
         for (_, byFolder) in grouped {
             for (path, group) in byFolder {
@@ -280,6 +282,7 @@ extension MailStore {
 
     /// Applies `transform` wherever this message is currently held.
     func mutateLocal(_ m: MailMessage, _ transform: (inout MailMessage) -> Void) {
+        defer { saveMessageCache() }
         if let idx = messagesByAccount[m.accountID]?.firstIndex(where: { $0.id == m.id }) {
             transform(&messagesByAccount[m.accountID]![idx])
         }
@@ -290,12 +293,14 @@ extension MailStore {
     }
 
     func removeLocal(_ m: MailMessage) {
+        defer { saveMessageCache() }
         messagesByAccount[m.accountID]?.removeAll { $0.id == m.id }
         messagesByFolder[folderKey(m.accountID, m.folderPath)]?.removeAll { $0.id == m.id }
         openBodies[m.id] = nil
     }
 
     func insertLocal(_ messages: [MailMessage]) {
+        defer { saveMessageCache() }
         for m in messages {
             if m.folderPath == "INBOX" {
                 var list = messagesByAccount[m.accountID] ?? []
