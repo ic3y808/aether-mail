@@ -33,6 +33,7 @@ struct RootView: View {
             }
         }
         .sheet(isPresented: $store.isAddingAccount) { AddMailboxView() }
+        .messageActionChrome()
         .overlay(alignment: .bottom) {
             if let banner = store.banner {
                 Text(banner)
@@ -99,6 +100,7 @@ struct InboxView: View {
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
                 .listRowInsets(EdgeInsets(top: 4, leading: 14, bottom: 4, trailing: 14))
+                .messageActions(m, store: store)
             }
         }
         .listStyle(.plain)
@@ -181,6 +183,7 @@ struct MessageRow: View {
 struct ReadingView: View {
     @Environment(MailStore.self) private var store
     let message: MailMessage
+    @Environment(\.dismiss) private var dismiss
     @State private var question = ""
     @State private var answer: String?
     @State private var asking = false
@@ -199,6 +202,26 @@ struct ReadingView: View {
         .background { AuroraBackdrop(intensity: 0.7) }
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button {
+                    store.toggleFlagged(message)
+                } label: {
+                    Image(systemName: message.flags.contains(.flagged) ? "flag.fill" : "flag")
+                }
+                Button { store.archive([message]) } label: { Image(systemName: "archivebox") }
+                Button(role: .destructive) {
+                    store.requestDelete([message])
+                    dismiss()
+                } label: {
+                    Image(systemName: store.deleteIntent(for: [message]) == .permanent
+                          ? "trash.slash" : "trash")
+                }
+                Menu {
+                    MessageMenu(message: message, store: store)
+                } label: { Image(systemName: "ellipsis.circle") }
+            }
+        }
         .onAppear { store.open(message) }
     }
 
@@ -362,6 +385,7 @@ struct FolderMessagesView: View {
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
                 .listRowInsets(EdgeInsets(top: 4, leading: 14, bottom: 4, trailing: 14))
+                .messageActions(m, store: store)
             }
         }
         .listStyle(.plain)

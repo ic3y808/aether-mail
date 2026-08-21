@@ -24,6 +24,19 @@ final class MailStore {
         var errorText: String? { if case .failed(let s) = self { return s } else { return nil } }
     }
 
+    /// Messages awaiting confirmation of an irreversible delete. Non-nil puts
+    /// the confirmation sheet on screen.
+    var pendingDelete: [MailMessage]?
+    /// One-step undo for the last move, shown as a toast. Swipe-to-delete is easy
+    /// to trigger by accident on a phone, so the action has to be take-backable.
+    var undoAction: UndoAction?
+
+    struct UndoAction: Identifiable {
+        let id = UUID()
+        let summary: String
+        let revert: @MainActor () -> Void
+    }
+
     var isAddingAccount = false
     var isSyncing = false
     var banner: String?
@@ -88,7 +101,7 @@ final class MailStore {
     }
 
     /// Connect + authenticate for a saved account — password OR OAuth (XOAUTH2).
-    private func openIMAP(for account: MailAccount) async throws -> IMAPClient {
+    func openIMAP(for account: MailAccount) async throws -> IMAPClient {
         let client = IMAPClient(transport: makeTransport(account.imap))
         try await client.connect()
         if account.imap.security == .startTLS { try await client.startTLS() }
@@ -405,7 +418,7 @@ final class MailStore {
         return e
     }
 
-    private func friendly(_ error: Error) -> String {
+    func friendly(_ error: Error) -> String {
         let s = "\(error)".lowercased()
         if s.contains("auth") || s.contains("login") || s.contains("credential") {
             return "Sign-in failed — check the email and app-specific password."
