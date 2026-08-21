@@ -96,3 +96,50 @@ public enum FolderRole: String, Codable, Sendable {
         }
     }
 }
+
+// MARK: - Finding the folder that plays a role
+
+extension MailFolder {
+
+    /// The folder that plays `role` among `folders`, or nil if the server has
+    /// none.
+    ///
+    /// Returns only a folder the server actually reported. Callers used to fall
+    /// back to a conventional name when the list was empty, which sent
+    /// `UID MOVE ... "Trash"` to servers whose trash is called something else -
+    /// `Deleted Messages` on iCloud, `[Gmail]/Trash` on Gmail - and every server
+    /// answered NO. A wrong folder is not a better answer than no folder.
+    public static func resolve(_ role: FolderRole, in folders: [MailFolder]) -> MailFolder? {
+        guard !folders.isEmpty else { return nil }
+
+        if let exact = folders.first(where: { $0.role == role }) { return exact }
+
+        // Gmail has no Archive. Archiving there removes the inbox label and what
+        // remains is All Mail, so a request to archive resolves onto it. Without
+        // this, Archive is permanently "no such folder" on the most widely used
+        // provider there is.
+        if role == .archive, let all = folders.first(where: { $0.role == .all }) {
+            return all
+        }
+
+        // Name fallback, for servers advertising no special-use flags. Matches
+        // the LAST path component: these are leaf names, and real paths are
+        // namespaced ("[Gmail]/Trash", "INBOX.Trash").
+        let names: [FolderRole: [String]] = [
+            .trash:   ["Trash", "Deleted Messages", "Deleted Items", "Bin"],
+            .archive: ["Archive", "Archives", "All Mail"],
+            .junk:    ["Junk", "Spam", "Junk E-mail", "Bulk Mail"],
+            .sent:    ["Sent", "Sent Messages", "Sent Items"],
+            .drafts:  ["Drafts", "Draft"]
+        ]
+        guard let candidates = names[role] else { return nil }
+        return folders.first { folder in
+            candidates.contains { $0.caseInsensitiveCompare(folder.leafName) == .orderedSame }
+        }
+    }
+
+    /// Last component of the IMAP path — `Trash` for `[Gmail]/Trash`.
+    public var leafName: String {
+        path.components(separatedBy: CharacterSet(charactersIn: "/.")).last ?? path
+    }
+}

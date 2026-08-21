@@ -42,21 +42,51 @@ extension MailStore {
     }
 
     /// The server path for `role` on this account, if it has one.
+    ///
+    /// Only ever returns a folder the server actually reported. It used to fall
+    /// back to a conventional name when the folder list had not loaded, which
+    /// meant every action fired `UID MOVE ... "Trash"` at servers whose trash is
+    /// called something else - `Deleted Messages` on iCloud, `[Gmail]/Trash` on
+    /// Gmail - and every one of them answered NO. Guessing looked like
+    /// resilience and was the reason nothing could be filed anywhere.
     func resolveFolder(_ account: MailAccount, role: FolderRole) -> String? {
         let folders = foldersByAccount[account.id] ?? []
+        guard !folders.isEmpty else { return nil }
+
         if let match = folders.first(where: { $0.role == role }) { return match.path }
-        // Folders not loaded yet (or the server advertises no special-use flag):
-        // fall back to the conventional names before giving up.
+
+        // Gmail has no Archive: archiving there means taking a message out of
+        // the inbox, and what is left is All Mail. Without this, Archive is
+        // permanently "no such folder" on the most common provider there is.
+        if role == .archive, let all = folders.first(where: { $0.role == .all }) {
+            return all.path
+        }
+
+        // Name fallback for servers that advertise no special-use flags. Match
+        // the LAST path component, because the names below are leaf names and
+        // real paths are namespaced - "[Gmail]/Trash", "INBOX.Trash".
         let names: [FolderRole: [String]] = [
-            .trash:   ["Trash", "Deleted Messages", "Deleted Items", "INBOX.Trash"],
-            .archive: ["Archive", "All Mail", "INBOX.Archive"],
-            .junk:    ["Junk", "Spam", "Junk E-mail", "INBOX.Junk"]
+            .trash:   ["Trash", "Deleted Messages", "Deleted Items", "Bin"],
+            .archive: ["Archive", "All Mail", "Archives"],
+            .junk:    ["Junk", "Spam", "Junk E-mail", "Bulk Mail"]
         ]
         guard let candidates = names[role] else { return nil }
-        if let known = folders.first(where: { f in
-            candidates.contains { $0.caseInsensitiveCompare(f.path) == .orderedSame }
-        }) { return known.path }
-        return folders.isEmpty ? candidates.first : nil
+        return folders.first { folder in
+            let leaf = folder.path
+                .components(separatedBy: CharacterSet(charactersIn: "/."))
+                .last ?? folder.path
+            return candidates.contains { $0.caseInsensitiveCompare(leaf) == .orderedSame }
+        }?.path
+    }
+
+    /// Guarantees the folder list for `account` is loaded before it is consulted.
+    ///
+    /// Actions used to depend on the Mailboxes screen having been opened at some
+    /// point, because that was the only caller of `loadFolders`. Anyone who went
+    /// straight to their inbox and swiped had no folder list at all.
+    func ensureFolders(_ account: MailAccount) async {
+        guard (foldersByAccount[account.id] ?? []).isEmpty else { return }
+        await loadFolders(account, force: true)
     }
 
     // MARK: - Delete
@@ -133,45 +163,67 @@ extension MailStore {
     /// Files `messages` under `role`, optimistically and reversibly.
     func move(_ messages: [MailMessage], toRole role: FolderRole, label: String) {
         guard !messages.isEmpty else { return }
-        var moved: [(MailMessage, String)] = []   // message + destination path
 
-        for m in messages {
-            guard let account = account(for: m) else { continue }
-            guard let target = resolveFolder(account, role: role) else {
-                banner = "\(account.emailAddress) has no \(label) folder."
-                continue
+        Task { @MainActor in
+            // Resolving needs the folder list, and loading it needs the network,
+            // so the whole resolve happens here rather than before the Task.
+            var moved: [(MailMessage, String)] = []
+            var complained: Set<UUID> = []
+
+            for m in messages {
+                guard let account = account(for: m) else { continue }
+                await ensureFolders(account)
+
+                guard let target = resolveFolder(account, role: role) else {
+                    if complained.insert(account.id).inserted {
+                        banner = "\(account.emailAddress) has no \(label) folder."
+                    }
+                    continue
+                }
+                guard target != m.folderPath else {
+                    banner = "Already in \(folderDisplayName(for: m))."
+                    continue
+                }
+                moved.append((m, target))
             }
-            guard target != m.folderPath else {
-                banner = "Already in \(folderDisplayName(for: m))."
-                continue
+            guard !moved.isEmpty else { return }
+
+            for (m, _) in moved { removeLocal(m) }
+
+            // One connection per mailbox, not per message. Opening a fresh IMAP
+            // session - TCP, TLS, LOGIN - for each of twenty selected messages
+            // fires twenty simultaneous logins; Gmail allows fifteen and answers
+            // the rest with "Too many simultaneous connections", and iCloud
+            // throttles harder still.
+            var grouped: [UUID: [String: [String: [MailMessage]]]] = [:]
+            for (m, target) in moved {
+                grouped[m.accountID, default: [:]][m.folderPath, default: [:]][target, default: []].append(m)
             }
-            moved.append((m, target))
-        }
-        guard !moved.isEmpty else { return }
 
-        for (m, _) in moved { removeLocal(m) }
-
-        for (m, target) in moved {
-            guard let account = account(for: m) else { continue }
-            let origin = m.folderPath
-            Task { @MainActor in
-                do {
-                    let client = try await openIMAP(for: account)
-                    _ = try await client.select(origin)
-                    try await client.move(uid: m.uid, to: target)
-                    await client.disconnect()
-                } catch {
-                    insertLocal([m])   // it did NOT move
-                    banner = "Couldn't move to \(label) — \(friendly(error))"
+            for (accountID, byOrigin) in grouped {
+                guard let account = accounts.first(where: { $0.id == accountID }) else { continue }
+                for (origin, byTarget) in byOrigin {
+                    do {
+                        let client = try await openIMAP(for: account)
+                        _ = try await client.select(origin)
+                        for (target, group) in byTarget {
+                            try await client.move(uids: group.map(\.uid), to: target)
+                        }
+                        await client.disconnect()
+                    } catch {
+                        let failed = byTarget.values.flatMap { $0 }
+                        insertLocal(failed)          // they did NOT move
+                        banner = "Couldn't move to \(label) — \(friendly(error))"
+                    }
                 }
             }
-        }
 
-        let summary = moved.count == 1 ? "Moved to \(label)" : "Moved \(moved.count) to \(label)"
-        undoAction = UndoAction(summary: summary) { [weak self] in
-            guard let self else { return }
-            self.undoAction = nil
-            for (m, target) in moved { self.moveBack(m, from: target) }
+            let summary = moved.count == 1 ? "Moved to \(label)" : "Moved \(moved.count) to \(label)"
+            undoAction = UndoAction(summary: summary) { [weak self] in
+                guard let self else { return }
+                self.undoAction = nil
+                for (m, target) in moved { self.moveBack(m, from: target) }
+            }
         }
     }
 

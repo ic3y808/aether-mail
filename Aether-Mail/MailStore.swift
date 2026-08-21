@@ -288,8 +288,11 @@ final class MailStore {
     }
 
     /// Load the IMAP folder list for an account (used by the Mailboxes screen).
-    func loadFolders(_ account: MailAccount) async {
-        guard foldersByAccount[account.id] == nil else { return }
+    func loadFolders(_ account: MailAccount, force: Bool = false) async {
+        // An empty list is not a loaded list. The old guard was `== nil`, so a
+        // cached snapshot holding an empty array for an account meant the real
+        // list was never fetched again - for the life of the install.
+        if !force, !(foldersByAccount[account.id] ?? []).isEmpty { return }
         do {
             let client = try await openIMAP(for: account)
             let folders = try await client.listFolders()
@@ -469,6 +472,14 @@ final class MailStore {
 
     func friendly(_ error: Error) -> String {
         let s = "\(error)".lowercased()
+        // Order matters. A throttled iCloud answers [AUTHENTICATIONFAILED], which
+        // contains "auth", so checking credentials first told people their
+        // password was wrong when the real problem was too many connections at
+        // once. Rate limiting is checked before authentication for that reason.
+        if s.contains("too many") || s.contains("limit") || s.contains("rate")
+            || s.contains("try again") || s.contains("busy") || s.contains("unavailable") {
+            return "The mail server is refusing more connections right now. Wait a moment and retry."
+        }
         if s.contains("auth") || s.contains("login") || s.contains("credential") {
             return "Sign-in failed — check the email and app-specific password."
         }
