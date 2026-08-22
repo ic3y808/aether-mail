@@ -28,6 +28,20 @@ public struct MailAccount: Codable, Sendable, Identifiable, Hashable {
     /// history (the default). Configurable per account in the edit screen.
     public var syncLimit: Int?
 
+    /// How this account actually signs in, when that differs from its
+    /// provider's default.
+    ///
+    /// Gmail and Outlook default to OAuth, but both accept an app-specific
+    /// password over LOGIN, and someone who signs in that way has no tokens.
+    /// Without this the account authenticated fine once and then took the OAuth
+    /// path on every later connection, failing with "Please sign in again" - an
+    /// account that worked when added and was broken by the time it synced.
+    /// Optional so accounts saved before this decode unchanged.
+    public var authOverride: MailAuthKind?
+
+    /// The auth this account should actually use.
+    public var effectiveAuth: MailAuthKind { authOverride ?? provider.authKind }
+
     /// Effective count to fetch, or nil for "all history".
     public var fetchCount: Int? {
         guard let n = syncLimit, n > 0 else { return nil }

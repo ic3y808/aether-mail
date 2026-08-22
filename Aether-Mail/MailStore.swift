@@ -149,7 +149,7 @@ final class MailStore {
         let client = IMAPClient(transport: makeTransport(account.imap))
         try await client.connect()
         if account.imap.security == .startTLS { try await client.startTLS() }
-        if account.provider.authKind == .oauth {
+        if account.effectiveAuth == .oauth {
             let token = try await validAccessToken(for: account)
             try await client.authenticateXOAUTH2(user: account.emailAddress, accessToken: token)
         } else if let pw = Keychain.getString(account.credentialRef) {
@@ -247,8 +247,12 @@ final class MailStore {
         let smtp = provider == .custom
             ? ServerEndpoint(host: imap.host.replacingOccurrences(of: "imap", with: "smtp"), port: 587, security: .startTLS)
             : ProviderCatalog.smtp(for: provider)
-        let account = MailAccount(provider: provider, emailAddress: email, displayName: email,
+        var account = MailAccount(provider: provider, emailAddress: email, displayName: email,
                                   imap: imap, smtp: smtp, credentialRef: ref, sortIndex: accounts.count)
+        // This account just proved it works with a password, whatever its
+        // provider prefers - so remember that rather than deriving OAuth from
+        // the provider and failing every sync after the first.
+        account.authOverride = (provider == .icloud) ? .appPassword : .password
         accounts.append(account)
         persist()
         await sync(account)
