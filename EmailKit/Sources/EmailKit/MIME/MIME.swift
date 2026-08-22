@@ -18,7 +18,17 @@ public enum MIME {
             // Emit the literal text before the encoded-word.
             result += remainder[remainder.startIndex..<start.lowerBound]
             let afterStart = remainder[start.upperBound...]
-            guard let end = afterStart.range(of: "?=") else {
+            // The terminator has to be looked for AFTER the charset and encoding
+            // fields, not from the start of the word. An encoded-word is
+            //   =?charset?encoding?text?=
+            // and Q-encoding writes bytes as =XX - so a subject beginning with a
+            // non-ASCII character produces "=?UTF-8?q?=E2=80=91...", where a
+            // naive search for "?=" matches the "?" before "=E2". That yielded
+            // the token "UTF-8?q", which has two fields instead of three, failed
+            // to decode, and put the raw encoded-word on screen.
+            guard let encodingSep = secondQuestionMark(in: afterStart),
+                  let end = afterStart[encodingSep...].range(of: "?=")
+            else {
                 // No terminator — treat the rest as literal.
                 result += remainder[start.lowerBound...]
                 return result
@@ -37,6 +47,16 @@ public enum MIME {
         }
         result += remainder
         return result
+    }
+
+    /// Index just past the second `?` in an encoded-word body, i.e. the start of
+    /// the encoded text. Nil when the word is malformed.
+    private static func secondQuestionMark(in text: Substring) -> Substring.Index? {
+        guard let first = text.firstIndex(of: "?") else { return nil }
+        let afterFirst = text.index(after: first)
+        guard afterFirst < text.endIndex,
+              let second = text[afterFirst...].firstIndex(of: "?") else { return nil }
+        return text.index(after: second)
     }
 
     /// Decodes the inside of one `=?...?=` (the `charset?enc?text` portion).

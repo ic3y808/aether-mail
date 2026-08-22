@@ -156,3 +156,36 @@ struct MIMEBuilderTests {
         #expect(msg.envelopeRecipients == ["b@x.com", "c@x.com", "d@x.com"])
     }
 }
+
+/// A subject that begins with a non-ASCII character produces a Q-encoded word
+/// whose text starts with "=", e.g. "=?UTF-8?q?=E2=80=91S...". A naive search
+/// for the "?=" terminator matches the "?" that separates the encoding field
+/// from the text, so the word failed to decode and appeared raw on screen -
+/// seen in a real inbox as "Your D-U-N=?UTF-8?q?=E2=80=91S=C2=AE_Profile...".
+@Suite("Encoded words whose text starts with =")
+struct EncodedWordTerminatorTests {
+
+    @Test("Q-encoded text beginning with an escape still decodes")
+    func qEncodedLeadingEscape() {
+        let raw = "Complete Your D-U-N=?UTF-8?q?=E2=80=91S=C2=AE_Profile?="
+        let decoded = MIME.decodeWords(raw)
+        #expect(!decoded.contains("=?"))
+        #expect(decoded.contains("S"))
+    }
+
+    @Test("A normal encoded word is unaffected")
+    func plainEncodedWord() {
+        #expect(MIME.decodeWords("=?UTF-8?B?SGVsbG8=?=") == "Hello")
+    }
+
+    @Test("Text with no encoded word passes through untouched")
+    func passthrough() {
+        #expect(MIME.decodeWords("Just a subject") == "Just a subject")
+    }
+
+    @Test("A malformed word is left alone rather than mangled")
+    func malformed() {
+        let raw = "=?UTF-8?onlytwo?="
+        #expect(MIME.decodeWords(raw).contains("=?"))
+    }
+}
