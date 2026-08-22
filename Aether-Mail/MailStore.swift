@@ -377,6 +377,10 @@ final class MailStore {
             for a in enabledAccounts { await sync(a) }
             isSyncing = false
             WatchBridge.shared.sync(from: self)   // mirror the fresh inbox to the watch
+            // Keeps the app badge honest and, more importantly, records what has
+            // been seen - so mail read in the foreground is never announced by a
+            // later background wake.
+            await MailNotifier.shared.announce(inbox, unreadTotal: unreadCount)
             prefetchInbox()                        // warm bodies + AI summaries in the background
             backfillSummaries()                    // ...then everything else that still lacks one
         }

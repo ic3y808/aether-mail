@@ -54,6 +54,14 @@ targets:
           - CFBundleURLName: com.aether.mail.oauth
             CFBundleURLSchemes:
               - com.aether.courier
+        # Background fetch: iOS wakes the app periodically to check for mail and
+        # post a local notification. Not true push - that would need an APNs key
+        # and a server-side IMAP watcher - but it needs no infrastructure and
+        # works against any provider the app already talks to.
+        UIBackgroundModes:
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.aether.mail.refresh
         UILaunchScreen:
           UIColorName: ""
         UISupportedInterfaceOrientations:
