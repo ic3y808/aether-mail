@@ -69,7 +69,8 @@ struct OnboardingView: View {
                 }
                 .buttonStyle(.borderedProminent).controlSize(.large).padding(.horizontal, 24)
                 Text("iCloud, Gmail, Outlook, or any IMAP server.")
-                    .font(.caption2).foregroundStyle(.secondary).padding(.bottom, 24)
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .padding(.bottom, 24)
             }
         }
     }
@@ -79,9 +80,16 @@ struct OnboardingView: View {
 
 struct InboxView: View {
     @Environment(MailStore.self) private var store
+    /// Persisted: a filter that resets every launch is a filter you stop using.
+    @AppStorage("inbox.showUnreadOnly") private var unreadOnly = false
+
+    private var visible: [MailMessage] {
+        unreadOnly ? store.inbox.filter { store.isUnread($0) } : store.inbox
+    }
 
     var body: some View {
         List {
+            filterBar
             ForEach(store.accounts.filter { store.syncState[$0.id]?.errorText != nil }) { account in
                 SyncErrorRow(account: account)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
@@ -92,7 +100,7 @@ struct InboxView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
-            ForEach(store.inbox) { m in
+            ForEach(visible) { m in
                 ZStack {
                     MessageRow(message: m).padding(12).glassCard(16)
                     NavigationLink { ReadingView(message: m) } label: { EmptyView() }.opacity(0)
@@ -107,11 +115,55 @@ struct InboxView: View {
         .scrollContentBackground(.hidden)
         .refreshable { store.refresh(); try? await Task.sleep(for: .milliseconds(500)) }
         .overlay {
-            if store.inbox.isEmpty && !store.isSyncing && !store.hasSyncErrors {
-                ContentUnavailableView("Inbox empty", systemImage: "tray",
-                                       description: Text("Pull to refresh, or add another mailbox."))
+            if visible.isEmpty && !store.isSyncing && !store.hasSyncErrors {
+                if unreadOnly && !store.inbox.isEmpty {
+                    ContentUnavailableView("All caught up", systemImage: "checkmark.circle",
+                                           description: Text("Nothing unread. Tap All to see everything."))
+                } else {
+                    ContentUnavailableView("Inbox empty", systemImage: "tray",
+                                           description: Text("Pull to refresh, or add another mailbox."))
+                }
             }
         }
+    }
+
+    /// All / Unread, with the unread count on the tab that filters to it - so
+    /// the number is visible without having to count dots down the list.
+    private var filterBar: some View {
+        HStack(spacing: 8) {
+            segment(title: "All", count: store.inbox.count, active: !unreadOnly) {
+                unreadOnly = false
+            }
+            segment(title: "Unread", count: store.unreadCount, active: unreadOnly) {
+                unreadOnly = true
+            }
+            Spacer()
+        }
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 2, leading: 14, bottom: 6, trailing: 14))
+    }
+
+    private func segment(title: String, count: Int, active: Bool,
+                         _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text(title).font(.caption.weight(.semibold))
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.caption2.weight(.bold).monospacedDigit())
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(active ? .white.opacity(0.25) : Color.primary.opacity(0.08)))
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background {
+                if active { Capsule().fill(LinearGradient.aether) }
+                else { Capsule().fill(.ultraThinMaterial) }
+            }
+            .foregroundStyle(active ? .white : .primary)
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -161,7 +213,9 @@ struct MessageRow: View {
                     }
                 }
                 Text(message.subject.isEmpty ? "(no subject)" : message.subject)
-                    .font(.subheadline).lineLimit(1)
+                    .font(.subheadline)
+                    .fontWeight(store.isUnread(message) ? .semibold : .regular)
+                    .lineLimit(1)
                     .foregroundStyle(store.isUnread(message) ? .primary : .secondary)
                 if !message.snippet.isEmpty {
                     Text(message.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
@@ -169,6 +223,26 @@ struct MessageRow: View {
             }
             if store.isUnread(message) {
                 Circle().fill(LinearGradient.aether).frame(width: 8, height: 8).padding(.top, 6)
+            }
+        }
+        // A bold sender and an 8pt dot were the only difference between read and
+        // unread, and against a translucent card at a glance they read the same.
+        // An unread row now carries an accent rail and a slightly brighter
+        // ground, so the distinction survives being scrolled past.
+        .overlay(alignment: .leading) {
+            if store.isUnread(message) {
+                Capsule()
+                    .fill(LinearGradient.aether)
+                    .frame(width: 3)
+                    .padding(.vertical, 2)
+                    .offset(x: -10)
+            }
+        }
+        .background {
+            if store.isUnread(message) {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.aetherViolet.opacity(0.10))
+                    .padding(-8)
             }
         }
     }
@@ -352,11 +426,32 @@ struct ReadingView: View {
 /// the iOS take on the macOS client's mailbox sidebar.
 struct MailboxesView: View {
     @Environment(MailStore.self) private var store
+    /// Which accounts are expanded, by id.
+    ///
+    /// Every account listing every folder meant scrolling past dozens of
+    /// mailboxes to reach a second account - and iCloud alone contributes a
+    /// long tail nobody opens. Collapsed by default, and the choice persists,
+    /// because someone who expands an account wants it expanded tomorrow too.
+    @AppStorage("mailboxes.expanded") private var expandedRaw = ""
+
+    private var expanded: Set<String> {
+        get { Set(expandedRaw.split(separator: ",").map(String.init)) }
+        nonmutating set { expandedRaw = newValue.sorted().joined(separator: ",") }
+    }
+
+    private func toggle(_ account: MailAccount) {
+        var next = expanded
+        if next.contains(account.id.uuidString) { next.remove(account.id.uuidString) }
+        else { next.insert(account.id.uuidString) }
+        expanded = next
+    }
 
     var body: some View {
         List {
             ForEach(store.enabledAccounts) { account in
+                let isOpen = expanded.contains(account.id.uuidString)
                 Section {
+                    if isOpen {
                     ForEach(store.foldersByAccount[account.id] ?? []) { folder in
                         NavigationLink {
                             FolderMessagesView(account: account, folder: folder)
@@ -376,12 +471,29 @@ struct MailboxesView: View {
                         }
                         .listRowBackground(Color.clear)
                     }
-                } header: {
-                    HStack(spacing: 8) {
-                        ProviderBadge(provider: account.provider, size: 22)
-                        Text(account.emailAddress).textCase(nil)
                     }
+                } header: {
+                    Button { withAnimation(.snappy) { toggle(account) } } label: {
+                        HStack(spacing: 8) {
+                            ProviderBadge(provider: account.provider, size: 22)
+                            Text(account.emailAddress).textCase(nil)
+                            Spacer()
+                            if !isOpen, let n = store.foldersByAccount[account.id]?.count, n > 0 {
+                                Text("\(n)")
+                                    .font(.caption2.weight(.bold).monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Image(systemName: "chevron.right")
+                                .font(.caption2.weight(.bold))
+                                .rotationEffect(.degrees(isOpen ? 90 : 0))
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
+                // Folders load whether or not the section is open, so the count
+                // in a collapsed header is real and opening one is instant.
                 .task { await store.loadFolders(account) }
             }
         }
