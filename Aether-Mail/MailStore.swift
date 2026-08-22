@@ -41,6 +41,10 @@ final class MailStore {
     /// failure never masquerades as content.
     var bodyErrors: [String: String] = [:]
     @ObservationIgnored var loadingBodies: Set<String> = []
+    /// Messages whose flag write has not been acknowledged yet. A sync that
+    /// landed mid-write would otherwise read the server's not-yet-updated flags
+    /// and pull the row straight back to unread.
+    @ObservationIgnored var pendingFlagWrites: Set<String> = []
 
     var pendingDelete: [MailMessage]?
     /// One-step undo for the last move, shown as a toast. Swipe-to-delete is easy
@@ -364,6 +368,12 @@ final class MailStore {
     func refresh() {
         Task {
             isSyncing = true
+            // Folders first: moving to Trash/Archive/Junk needs the account's
+            // real server paths. This used to load only when the Mailboxes
+            // screen was opened, so until then every move guessed "Trash" -
+            // wrong for Gmail ("[Gmail]/Trash"), so the move failed and the
+            // message came straight back.
+            for a in enabledAccounts { await loadFolders(a) }
             for a in enabledAccounts { await sync(a) }
             isSyncing = false
             WatchBridge.shared.sync(from: self)   // mirror the fresh inbox to the watch
@@ -425,15 +435,7 @@ final class MailStore {
             await loadBody(m)
             await summarizeIfNeeded(m)                       // on-device AI summary
         }
-        if m.isUnread, let account = account(for: m) {
-            Task {                                          // best-effort \Seen on the server
-                if let client = try? await openIMAP(for: account) {
-                    _ = try? await client.select(m.folderPath)
-                    try? await client.store(uid: m.uid, flag: "\\Seen", add: true)
-                    await client.disconnect()
-                }
-            }
-        }
+        if m.isUnread { setRead(m, true) }   // server-verified, rolls back on failure
     }
 
     func loadBody(_ m: MailMessage) async {

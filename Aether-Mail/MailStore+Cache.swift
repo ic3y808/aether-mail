@@ -79,6 +79,10 @@ extension MailStore {
             let set = plan.reused.map(String.init).joined(separator: ",")
             if let fresh = try? await client.fetchFlags(uidSet: set) {
                 for (uid, flags) in fresh where byUID[uid] != nil {
+                    // Skip anything we are still writing - the server has not
+                    // caught up yet, and taking its answer would undo the change
+                    // the user just made.
+                    guard !pendingFlagWrites.contains(byUID[uid]!.id) else { continue }
                     byUID[uid]!.flags = flags
                     // The server is authoritative about \Seen, so a local
                     // "read" mark that the server disagrees with is dropped.

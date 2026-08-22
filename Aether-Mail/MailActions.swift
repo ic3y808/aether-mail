@@ -298,7 +298,9 @@ extension MailStore {
         guard let account = account(for: m) else { return }
         if read { readIDs.insert(m.id) } else { readIDs.remove(m.id) }
         mutateLocal(m) { $0.flags = read ? $0.flags.union(.seen) : $0.flags.subtracting(.seen) }
+        pendingFlagWrites.insert(m.id)
         Task { @MainActor in
+            defer { pendingFlagWrites.remove(m.id) }
             do {
                 let client = try await openIMAP(for: account)
                 _ = try await client.select(m.folderPath)
