@@ -148,10 +148,13 @@ public actor IMAPClient {
     /// Lists all folders (`LIST "" "*"`), enriched with special-use roles.
     public func listFolders() async throws -> [MailFolder] {
         var folders: [MailFolder] = []
-        _ = try await execute("LIST \"\" \"*\"") { bytes in
+        let tagged = try await execute("LIST \"\" \"*\"") { bytes in
             if case .list(let folder)? = IMAPResponseParser.parseUntagged(bytes) {
                 folders.append(folder)
             }
+        }
+        guard tagged.status == .ok else {
+            throw IMAPClientError.commandFailed(command: "LIST", status: tagged.status.rawValue, text: tagged.text)
         }
         return folders.sorted {
             $0.role.sortPriority != $1.role.sortPriority
@@ -178,8 +181,11 @@ public actor IMAPClient {
     /// UID SEARCH — returns matching UIDs. `criteria` defaults to ALL.
     public func uidSearch(_ criteria: String = "ALL") async throws -> [UInt32] {
         var uids: [UInt32] = []
-        _ = try await execute("UID SEARCH \(criteria)") { bytes in
+        let tagged = try await execute("UID SEARCH \(criteria)") { bytes in
             if case .search(let found)? = IMAPResponseParser.parseUntagged(bytes) { uids = found }
+        }
+        guard tagged.status == .ok else {
+            throw IMAPClientError.commandFailed(command: "SEARCH", status: tagged.status.rawValue, text: tagged.text)
         }
         return uids
     }
@@ -188,22 +194,54 @@ public actor IMAPClient {
     public func fetchSummaries(uidSet: String) async throws -> [MailMessage] {
         guard let folder = selected?.path else { throw IMAPClientError.notSelected }
         var results: [(seq: Int, IMAPFetchResult)] = []
-        _ = try await execute("UID FETCH \(uidSet) (UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODYSTRUCTURE)") { bytes in
+        let tagged = try await execute("UID FETCH \(uidSet) (UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODYSTRUCTURE)") { bytes in
             if case .fetch(let seq, let r)? = IMAPResponseParser.parseUntagged(bytes) {
                 results.append((seq, r))
             }
         }
+        guard tagged.status == .ok else {
+            throw IMAPClientError.commandFailed(command: "FETCH", status: tagged.status.rawValue, text: tagged.text)
+        }
         return results.compactMap { Self.makeMessage(from: $0.1, folderPath: folder) }
+    }
+
+    /// Fetches just the flags for a UID set.
+    ///
+    /// Cached message summaries are reused across launches, which froze \Seen and
+    /// \Flagged at whatever they were when first fetched - mail read or starred
+    /// on another device stayed bold here forever. Flags are cheap to re-fetch;
+    /// envelopes and structure are not, and never change.
+    public func fetchFlags(uidSet: String) async throws -> [UInt32: MessageFlags] {
+        var out: [UInt32: MessageFlags] = [:]
+        let tagged = try await execute("UID FETCH \(uidSet) (UID FLAGS)") { bytes in
+            if case .fetch(_, let r)? = IMAPResponseParser.parseUntagged(bytes), let uid = r.uid {
+                out[uid] = r.flags
+            }
+        }
+        guard tagged.status == .ok else {
+            throw IMAPClientError.commandFailed(command: "FETCH", status: tagged.status.rawValue, text: tagged.text)
+        }
+        return out
     }
 
     /// Fetches the full raw RFC822 body for one UID (BODY.PEEK[] leaves \Seen
     /// untouched — marking read is an explicit user action).
     public func fetchRawMessage(uid: UInt32) async throws -> [UInt8] {
         var body: [UInt8] = []
-        _ = try await execute("UID FETCH \(uid) (BODY.PEEK[])") { bytes in
+        let tagged = try await execute("UID FETCH \(uid) (BODY.PEEK[])") { bytes in
             if case .fetch(_, let r)? = IMAPResponseParser.parseUntagged(bytes), let s = r.bodySection {
                 body = Array(s.utf8)
             }
+        }
+        guard tagged.status == .ok else {
+            throw IMAPClientError.commandFailed(command: "FETCH", status: tagged.status.rawValue, text: tagged.text)
+        }
+        // An OK FETCH that produced no BODY[] section is a parse miss, not an
+        // empty email. Returning [] made it indistinguishable from a real
+        // message with no content - and the caller cached that emptiness.
+        guard !body.isEmpty else {
+            throw IMAPClientError.commandFailed(command: "FETCH", status: "OK",
+                                                text: "no BODY[] section in response for UID \(uid)")
         }
         return body
     }
@@ -226,10 +264,18 @@ public actor IMAPClient {
         guard tagged.status == .ok else {
             throw IMAPClientError.commandFailed(command: "STORE", status: tagged.status.rawValue, text: tagged.text)
         }
-        // UID EXPUNGE (RFC 4315) removes only the flagged UIDs; fall back to a
-        // plain EXPUNGE on servers without UIDPLUS.
+        // UID EXPUNGE (RFC 4315) removes only the flagged UIDs. A bare EXPUNGE
+        // removes EVERY \Deleted message in the mailbox - including ones another
+        // client flagged and has not expunged yet - so it is not a safe fallback
+        // for "delete these three". On a server without UIDPLUS, undo the flag we
+        // set and report failure rather than deleting mail nobody asked about.
         let byUid = try await execute("UID EXPUNGE \(uidSet)")
-        if byUid.status != .ok { _ = try await execute("EXPUNGE") }
+        if byUid.status != .ok {
+            _ = try? await execute("UID STORE \(uidSet) -FLAGS (\\Deleted)")
+            throw IMAPClientError.commandFailed(
+                command: "UID EXPUNGE", status: byUid.status.rawValue,
+                text: "server does not support UIDPLUS; refusing a mailbox-wide EXPUNGE. \(byUid.text)")
+        }
     }
 
     /// Creates a new mailbox/folder.

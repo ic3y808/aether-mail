@@ -71,6 +71,22 @@ extension MailStore {
             }
         }
 
+        // Reused entries keep their envelope but NOT their flags: read and
+        // starred state changes on other devices, and a cache that never
+        // refreshed them left mail bold here forever. Flags are cheap - a
+        // FETCH FLAGS over the reused window, no envelopes or structure.
+        if !plan.reused.isEmpty {
+            let set = plan.reused.map(String.init).joined(separator: ",")
+            if let fresh = try? await client.fetchFlags(uidSet: set) {
+                for (uid, flags) in fresh where byUID[uid] != nil {
+                    byUID[uid]!.flags = flags
+                    // The server is authoritative about \Seen, so a local
+                    // "read" mark that the server disagrees with is dropped.
+                    if !flags.contains(.seen) { readIDs.remove(byUID[uid]!.id) }
+                }
+            }
+        }
+
         return wantedUIDs.compactMap { byUID[$0] }
     }
 
@@ -124,22 +140,61 @@ extension MailStore {
         Task(priority: .background) { @MainActor in
             defer { backfilling = false }
 
-            // Newest first — that is what someone is most likely to open next.
-            let pending = (messagesByAccount.values.flatMap { $0 } + messagesByFolder.values.flatMap { $0 })
-                .filter { summaries[$0.id] == nil }
-                .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+            // Grouped by account, because the bodies for one account are fetched
+            // over ONE connection. Doing it per message opened a connect + TLS +
+            // login cycle each time; Gmail caps simultaneous IMAP connections at
+            // 15 and starts refusing, which is how a backfill turned into
+            // "Couldn't reach the server" for the whole account.
+            for account in enabledAccounts {
+                let pending = (messagesByAccount[account.id] ?? [])
+                    .filter { summaries[$0.id] == nil && bodyErrors[$0.id] == nil }
+                    .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+                    .prefix(Self.backfillLimit)
+                guard !pending.isEmpty else { continue }
 
-            var seen = Set<String>()
-            for m in pending {
-                guard !Task.isCancelled else { return }
-                guard seen.insert(m.id).inserted else { continue }
-                guard summaries[m.id] == nil else { continue }
+                let needBody = pending.filter { openBodies[$0.id] == nil }
+                if !needBody.isEmpty {
+                    // One connection, one SELECT, every body.
+                    do {
+                        try await withIMAP(account) { client in
+                            _ = try await client.select("INBOX")
+                            for m in needBody {
+                                guard !Task.isCancelled else { return }
+                                if let cached = await MailCache.shared.body(m.id) {
+                                    openBodies[m.id] = cached
+                                    continue
+                                }
+                                do {
+                                    let raw = try await client.fetchRawMessage(uid: m.uid)
+                                    let parsed = MIMEMessageParser.parse(raw)
+                                    guard parsed.hasContent else { continue }
+                                    openBodies[m.id] = parsed
+                                    await MailCache.shared.saveBody(parsed, for: m.id)
+                                } catch {
+                                    // One bad message must not abandon the batch,
+                                    // and must not be recorded as a summary.
+                                    bodyErrors[m.id] = friendly(error)
+                                }
+                                try? await Task.sleep(for: .milliseconds(120))
+                            }
+                        }
+                    } catch {
+                        // The account is unreachable; stop rather than hammering
+                        // it once per remaining message.
+                        continue
+                    }
+                }
 
-                // A summary needs the body; fetch it if this one was never opened.
-                if openBodies[m.id] == nil { await loadBody(m) }
-                await summarizeIfNeeded(m)
-                try? await Task.sleep(for: .milliseconds(400))
+                for m in pending {
+                    guard !Task.isCancelled else { return }
+                    await summarizeIfNeeded(m)
+                    try? await Task.sleep(for: .milliseconds(400))
+                }
             }
         }
     }
+
+    /// How far back to backfill per account per pass. Unbounded, this walked
+    /// every cached message on every refresh; the rest fill in over later passes.
+    static var backfillLimit: Int { 60 }
 }

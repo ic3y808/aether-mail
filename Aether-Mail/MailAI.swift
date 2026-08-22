@@ -20,7 +20,18 @@ enum MailAI {
     }
 
     /// A short, plain one-line summary of an email. Nil if AI is unavailable.
+    /// The shortest body worth summarising. Below this the model has nothing to
+    /// work from and invents something - which, once cached, is indistinguishable
+    /// from a real summary and is never recomputed.
+    private static let minimumBodyChars = 40
+
     static func summarize(subject: String, from: String, body: String) async -> String? {
+        // Never summarise a body that failed to load. The app used to store the
+        // error text as the body, so the model dutifully summarised *that* and
+        // the result was cached forever: "... failed to load due to a connection
+        // timeout" presented to the user as a summary of their email.
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= minimumBodyChars, !isFailurePlaceholder(trimmed) else { return nil }
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *), isAvailable {
             let session = LanguageModelSession(instructions: """
@@ -38,6 +49,17 @@ enum MailAI {
         }
         #endif
         return nil
+    }
+
+    /// Text the app generated to describe a failure, rather than message content.
+    /// Belt and braces: the caller should never pass one, but a summary derived
+    /// from one is permanent, so it is worth checking twice.
+    static func isFailurePlaceholder(_ text: String) -> Bool {
+        let markers = ["couldn't load this message",
+                       "couldn't reach the server",
+                       "sign-in failed"]
+        let lowered = text.lowercased()
+        return markers.contains { lowered.hasPrefix($0) }
     }
 
     /// Free-form question about an open email (the Copilot ask box).

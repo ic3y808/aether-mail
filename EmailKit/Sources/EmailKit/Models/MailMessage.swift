@@ -143,3 +143,16 @@ public struct MailAttachment: Codable, Sendable, Hashable, Identifiable {
         self.data = data
     }
 }
+
+public extension MailBody {
+    /// Whether this body actually carries something to show.
+    ///
+    /// A failed fetch or a parse miss yields a `MailBody` whose fields are empty
+    /// rather than nil, which is indistinguishable from a blank email at the type
+    /// level — so callers that persist or render bodies need to ask explicitly.
+    var hasContent: Bool {
+        if let plainText, !plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        if let html, !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        return !attachments.isEmpty
+    }
+}

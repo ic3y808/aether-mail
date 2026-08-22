@@ -25,6 +25,17 @@ actor MailCache {
         var messages: [MailMessage]
     }
 
+    /// Bumped when a defect made previously-written cache entries untrustworthy.
+    /// On a mismatch the whole cache is discarded rather than migrated - it is
+    /// all re-derivable from the server, and there is no way to tell a poisoned
+    /// entry from a good one after the fact.
+    ///
+    /// v2: entries written before this carry summaries generated from failure
+    /// text ("... failed to load due to a connection timeout") and bodies that
+    /// were empty because a failed FETCH returned zero bytes and was cached as a
+    /// success. Both were served forever and never recomputed.
+    private static let version = 2
+
     private let root: URL
     private let bodiesDir: URL
 
@@ -41,6 +52,23 @@ actor MailCache {
         root = base.appendingPathComponent("AetherMail/Cache", isDirectory: true)
         bodiesDir = root.appendingPathComponent("bodies", isDirectory: true)
         try? FileManager.default.createDirectory(at: bodiesDir, withIntermediateDirectories: true)
+        Self.discardIfStale(root: root, bodiesDir: bodiesDir)
+    }
+
+    /// Wipes the cache when it was written by an older, buggier version.
+    private nonisolated static func discardIfStale(root: URL, bodiesDir: URL) {
+        let marker = root.appendingPathComponent("version")
+        let found = (try? String(contentsOf: marker, encoding: .utf8))
+            .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard found != Self.version else { return }
+
+        let fm = FileManager.default
+        for name in ["folders.json", "messages.json", "ai.json", "read.json"] {
+            try? fm.removeItem(at: root.appendingPathComponent(name))
+        }
+        try? fm.removeItem(at: bodiesDir)
+        try? fm.createDirectory(at: bodiesDir, withIntermediateDirectories: true)
+        try? "\(Self.version)".write(to: marker, atomically: true, encoding: .utf8)
     }
 
     // MARK: - Paths
@@ -87,7 +115,12 @@ actor MailCache {
         return snap
     }
 
-    func body(_ messageID: String) -> MailBody? { decode(bodyURL(messageID)) }
+    /// A cached body with no content is treated as a miss, so anything written by
+    /// an older build is refetched rather than served forever.
+    func body(_ messageID: String) -> MailBody? {
+        guard let cached: MailBody = decode(bodyURL(messageID)), cached.hasContent else { return nil }
+        return cached
+    }
 
     // MARK: - Write
 
@@ -102,6 +135,10 @@ actor MailCache {
     func saveReadIDs(_ ids: Set<String>) { encode(Array(ids), to: readURL) }
 
     func saveBody(_ body: MailBody, for messageID: String) {
+        // An empty body means the fetch or the parse failed, not that the email
+        // is blank. Caching it made "(no content)" permanent, because a cache hit
+        // stops the retry.
+        guard body.hasContent else { return }
         guard let data = try? JSONEncoder().encode(body), data.count <= Self.maxBodyBytes else { return }
         try? data.write(to: bodyURL(messageID), options: .atomic)
         pruneBodiesIfNeeded()
@@ -137,6 +174,16 @@ actor MailCache {
         var folders: [String: [MailFolder]] = decode(foldersURL) ?? [:]
         folders[prefix] = nil
         encode(folders, to: foldersURL)
+
+        // Summaries and read ids are keyed by message id, which begins with the
+        // account UUID - without this a removed account left its AI summaries and
+        // read state on disk indefinitely.
+        var summaries: [String: String] = decode(summariesURL) ?? [:]
+        summaries = summaries.filter { !$0.key.hasPrefix(prefix) }
+        encode(summaries, to: summariesURL)
+
+        let read = (decode(readURL) as [String]? ?? []).filter { !$0.hasPrefix(prefix) }
+        encode(read, to: readURL)
     }
 
     // MARK: - Codable plumbing

@@ -37,6 +37,11 @@ final class MailStore {
 
     /// Messages awaiting confirmation of an irreversible delete. Non-nil puts
     /// the confirmation sheet on screen.
+    /// Why a body failed to load, per message. Kept apart from `openBodies` so a
+    /// failure never masquerades as content.
+    var bodyErrors: [String: String] = [:]
+    @ObservationIgnored var loadingBodies: Set<String> = []
+
     var pendingDelete: [MailMessage]?
     /// One-step undo for the last move, shown as a toast. Swipe-to-delete is easy
     /// to trigger by accident on a phone, so the action has to be take-backable.
@@ -118,6 +123,24 @@ final class MailStore {
     }
 
     /// Connect + authenticate for a saved account — password OR OAuth (XOAUTH2).
+    /// Runs `work` on a connection that is always closed, however it ends.
+    ///
+    /// Call sites used to `disconnect()` on the happy path only, so every thrown
+    /// error leaked a live connection. Providers cap simultaneous IMAP
+    /// connections (Gmail at 15), and a leak per failure is what turns one
+    /// timeout into an account that cannot connect at all.
+    func withIMAP<T>(_ account: MailAccount, _ work: (IMAPClient) async throws -> T) async throws -> T {
+        let client = try await openIMAP(for: account)
+        do {
+            let result = try await work(client)
+            await client.disconnect()
+            return result
+        } catch {
+            await client.disconnect()
+            throw error
+        }
+    }
+
     func openIMAP(for account: MailAccount) async throws -> IMAPClient {
         let client = IMAPClient(transport: makeTransport(account.imap))
         try await client.connect()
@@ -415,30 +438,56 @@ final class MailStore {
 
     func loadBody(_ m: MailMessage) async {
         guard openBodies[m.id] == nil, let account = account(for: m) else { return }
-        // Already parsed on a previous run? Then there is nothing to fetch.
+        // A cached body is only served when it actually has content; anything
+        // empty is treated as a miss so it gets another chance.
         if let cached = await MailCache.shared.body(m.id) {
             openBodies[m.id] = cached
+            bodyErrors[m.id] = nil
             return
         }
+        guard !loadingBodies.contains(m.id) else { return }
+        loadingBodies.insert(m.id)
+        defer { loadingBodies.remove(m.id) }
+
         do {
-            let client = try await openIMAP(for: account)
-            _ = try await client.select(m.folderPath)
-            let raw = try await client.fetchRawMessage(uid: m.uid)
-            await client.disconnect()
-            let parsed = MIMEMessageParser.parse(raw)
+            let parsed = try await withIMAP(account) { client in
+                _ = try await client.select(m.folderPath)
+                let raw = try await client.fetchRawMessage(uid: m.uid)
+                return MIMEMessageParser.parse(raw)
+            }
+            // An empty parse is a defect, not a blank email - do not let it
+            // occupy the slot, or the message reads "(no content)" forever.
+            guard parsed.hasContent else {
+                bodyErrors[m.id] = "This message arrived empty. Tap retry to fetch it again."
+                return
+            }
             openBodies[m.id] = parsed
+            bodyErrors[m.id] = nil
             await MailCache.shared.saveBody(parsed, for: m.id)
         } catch {
-            // Not cached — a failure is about this attempt, not about the message.
-            openBodies[m.id] = MailBody(plainText: "Couldn't load this message.\n\n\(friendly(error))")
+            // Recorded separately from the body. Storing the error text *as* the
+            // body meant it was summarised as though it were the email, and the
+            // non-nil value blocked every retry for the rest of the session.
+            bodyErrors[m.id] = friendly(error)
         }
+    }
+
+    /// Drops the failure and tries again - what the retry button calls.
+    func retryBody(_ m: MailMessage) {
+        bodyErrors[m.id] = nil
+        openBodies[m.id] = nil
+        Task { await loadBody(m) }
     }
 
     func summarizeIfNeeded(_ m: MailMessage) async {
         guard MailAI.isAvailable, summaries[m.id] == nil, !summarizing.contains(m.id) else { return }
         summarizing.insert(m.id)
         defer { summarizing.remove(m.id) }
-        let body = openBodies[m.id]?.bestText ?? m.snippet
+        // Only summarise a body that actually loaded. `bestText` returns "" for a
+        // failed or empty parse rather than nil, so the old `?? m.snippet`
+        // fallback could never fire and the model was handed nothing.
+        guard let loaded = openBodies[m.id], loaded.hasContent else { return }
+        let body = loaded.bestText
         if let s = await MailAI.summarize(subject: m.subject,
                                           from: m.from.first?.shortLabel ?? "unknown", body: body) {
             summaries[m.id] = s

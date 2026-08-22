@@ -257,6 +257,9 @@ struct ReadingView: View {
                 Text("Summary").font(.caption2).foregroundStyle(.secondary).kerning(1.2)
                 if let s = store.summary(for: message.id) {
                     Text(s).font(.callout)
+                } else if store.bodyErrors[message.id] != nil {
+                    Text("No summary — the message didn't load.")
+                        .font(.callout).foregroundStyle(.secondary)
                 } else {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.mini)
@@ -275,6 +278,27 @@ struct ReadingView: View {
         Group {
             if let body = store.body(for: message) {
                 EmailBodyView(content: body)
+            } else if let reason = store.bodyErrors[message.id] {
+                // A failure is shown in the app's own chrome with a way out. It
+                // used to be written into the body itself, which rendered it on
+                // the white "paper" card as though the sender had written it -
+                // and left no way to try again.
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Couldn't load this message", systemImage: "exclamationmark.triangle")
+                        .font(.callout.weight(.semibold))
+                    Text(reason).font(.footnote).foregroundStyle(.secondary)
+                    Button {
+                        store.retryBody(message)
+                    } label: {
+                        Label("Try Again", systemImage: "arrow.clockwise")
+                            .font(.footnote.weight(.semibold))
+                            .padding(.horizontal, 14).padding(.vertical, 8)
+                            .background(LinearGradient.aether.opacity(0.35), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16).glassCard(18)
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
