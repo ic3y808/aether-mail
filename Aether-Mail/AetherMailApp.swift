@@ -22,6 +22,9 @@ struct AetherMailApp: App {
                 .tint(.aetherViolet)
                 .preferredColorScheme(.dark)   // the aurora-glass look is dark-first
                 .task {
+                    // Debug + Simulator only: signs in from a file on the Mac so
+                    // a rebuild does not mean retyping an app password.
+                    await DevBootstrap.run(store: store)
                     await MailNotifier.shared.requestAuthorization()
                     // A fresh install must not fire a banner for every message
                     // already sitting in the inbox - the first sync is the

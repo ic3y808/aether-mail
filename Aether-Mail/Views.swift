@@ -23,6 +23,13 @@ struct RootView: View {
                             ToolbarItem(placement: .topBarLeading) {
                                 NavigationLink { AccountsView() } label: { Image(systemName: "person.2.circle") }
                             }
+                            // Experimental reading models. Self-contained in
+                            // Lab/ - delete the folder and this line to remove.
+                            ToolbarItem(placement: .topBarLeading) {
+                                NavigationLink { MailLabView() } label: {
+                                    Image(systemName: "flask")
+                                }
+                            }
                             ToolbarItem(placement: .topBarTrailing) {
                                 if store.isSyncing { ProgressView() }
                                 else { Button { store.refresh() } label: { Image(systemName: "arrow.clockwise") } }
@@ -51,6 +58,7 @@ struct OnboardingView: View {
     @Environment(MailStore.self) private var store
 
     var body: some View {
+        NavigationStack {
         ZStack {
             AuroraBackdrop()
             VStack(spacing: 22) {
@@ -70,8 +78,17 @@ struct OnboardingView: View {
                 .buttonStyle(.borderedProminent).controlSize(.large).padding(.horizontal, 24)
                 Text("iCloud, Gmail, Outlook, or any IMAP server.")
                     .font(.caption2).foregroundStyle(.secondary)
-                    .padding(.bottom, 24)
+                // Without this the Lab is unreachable on a device with no
+                // account - which is every Simulator, and so exactly where the
+                // experiments most need to be looked at.
+                NavigationLink { MailLabView() } label: {
+                    Label("Try the Lab", systemImage: "flask")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.aetherViolet)
+                }
+                .padding(.bottom, 24)
             }
+        }
         }
     }
 }

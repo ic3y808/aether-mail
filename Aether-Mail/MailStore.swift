@@ -35,6 +35,178 @@ final class MailStore {
     @ObservationIgnored var summarySaveTask: Task<Void, Never>?
     @ObservationIgnored var backfilling = false
 
+    /// Shows fabricated mail everywhere in the app, for recording demos.
+    ///
+    /// Deliberately **not** persisted. Backgrounding the app keeps it on, so
+    /// screen recording and app-switching work; launching the app fresh always
+    /// starts with real mail. The failure mode to avoid is leaving a demo on for
+    /// days and quietly missing real messages, and an in-memory flag cannot
+    /// survive long enough to do that.
+    ///
+    /// While it is on, syncing and notifications are suspended - fetching real
+    /// mail into a fake inbox would either corrupt the demo or, worse, notify
+    /// about messages the owner then cannot find.
+    var demoMode = false {
+        didSet {
+            guard demoMode != oldValue else { return }
+            // Scheduled, not immediate. This is set from a SwiftUI Binding, and
+            // mutating more observable state (demoPrep, demoReady) synchronously
+            // inside the same update cycle made SwiftUI discard the write - the
+            // switch visibly refused to move.
+            let turningOn = demoMode
+            Task { @MainActor in
+                if turningOn {
+                    prepareDemo()
+                } else {
+                    demoPrep = nil
+                    demoReady = false
+                    // Back to reality: pick up whatever arrived meanwhile.
+                    // Nothing to tear down going the other way - sync() and
+                    // refresh() both return early while a demo is on.
+                    refresh()
+                }
+            }
+        }
+    }
+
+    /// How far the demo is from being recordable, and roughly how long is left.
+    ///
+    /// Turning demo mode on used to swap the mail instantly but leave every
+    /// derived thing empty - no bodies, no summaries - so the first thirty
+    /// seconds of any recording were the app computing them live. The whole
+    /// point of a demo mode is that it looks finished, so it now does the work
+    /// up front and says when it is done.
+    var demoPrep: (done: Int, total: Int, secondsLeft: Int)?
+    var demoReady = false
+    @ObservationIgnored private var preparingDemo = false
+
+    /// Fills in everything the UI derives from a message, before recording.
+    func prepareDemo() {
+        guard !preparingDemo else { return }
+        preparingDemo = true
+        demoReady = false
+        Task { @MainActor in
+            defer { preparingDemo = false }
+            let messages = LabSampleMail.inbox()
+            let total = messages.count
+            demoPrep = (0, total, 0)
+
+            // Sample mail carries its text inline, so "loading" it is free -
+            // the expensive part is the on-device summary for each one.
+            for m in messages where openBodies[m.id] == nil {
+                openBodies[m.id] = MailBody(plainText: m.snippet)
+            }
+
+            let started = Date()
+            var done = 0
+            for m in messages {
+                guard demoMode else { demoPrep = nil; return }   // switched off mid-prep
+                if summaries[m.id] == nil {
+                    await summarizeIfNeeded(m)
+                }
+                done += 1
+                // Estimated from what this device has actually managed so far,
+                // not a guess: the first summary warms the model and is much
+                // slower than the rest, so a fixed per-item figure would lie.
+                let elapsed = Date().timeIntervalSince(started)
+                let perItem = elapsed / Double(max(done, 1))
+                let remaining = Int((perItem * Double(total - done)).rounded())
+                demoPrep = (done, total, remaining)
+            }
+            demoPrep = nil
+            demoReady = true
+        }
+    }
+
+    /// Progress of the full-text warm-up: (fetched, total). Non-nil while running.
+    var bodyWarmProgress: (done: Int, total: Int)?
+    /// What the last warm-up actually achieved, kept after it finishes.
+    var lastWarmSummary: String?
+    @ObservationIgnored private var warming = false
+
+    /// Fetches the full text of every cached message.
+    ///
+    /// Extraction and AI can only work with what has actually been downloaded,
+    /// and until now that was whatever the owner happened to open plus the
+    /// newest handful the prefetch reached. Everything else had a subject and
+    /// nothing else - which is why pulling amounts and codes out of a mailbox
+    /// found one amount instead of dozens.
+    ///
+    /// One connection per account, not one per message: the same mistake that
+    /// made a backfill trip Gmail's simultaneous-connection limit. Cached bodies
+    /// are skipped, so a second run costs almost nothing.
+    func warmAllBodies() {
+        guard !warming else { return }
+        warming = true
+        Task { @MainActor in
+            defer { warming = false; bodyWarmProgress = nil }
+
+            let startingBodies = openBodies.count
+            let everything = enabledAccounts.map { account in
+                (account, (messagesByAccount[account.id] ?? [])
+                    .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) })
+            }
+            let total = everything.reduce(0) { $0 + $1.1.count }
+            guard total > 0 else { return }
+            var done = 0
+            bodyWarmProgress = (0, total)
+
+            for (account, messages) in everything {
+                let missing = messages.filter { openBodies[$0.id] == nil }
+                // Serve from disk first - free, and usually most of them.
+                for m in missing {
+                    if let cached = await MailCache.shared.body(m.id) {
+                        openBodies[m.id] = cached
+                    }
+                }
+                let stillMissing = messages.filter { openBodies[$0.id] == nil }
+                done += messages.count - stillMissing.count
+                bodyWarmProgress = (done, total)
+                guard !stillMissing.isEmpty else { continue }
+
+                do {
+                    try await withIMAP(account) { client in
+                        _ = try await client.select("INBOX")
+                        for m in stillMissing {
+                            guard !Task.isCancelled else { return }
+                            do {
+                                let raw = try await client.fetchRawMessage(uid: m.uid)
+                                let parsed = MIMEMessageParser.parse(raw)
+                                if parsed.hasContent {
+                                    openBodies[m.id] = parsed
+                                    await MailCache.shared.saveBody(parsed, for: m.id)
+                                }
+                            } catch {
+                                // One unreadable message must not end the batch.
+                                bodyErrors[m.id] = friendly(error)
+                            }
+                            done += 1
+                            // Publishing every single fetch made SwiftUI redraw
+                            // the whole Lab sixty-eight times during one warm-up.
+                            if done % 5 == 0 || done == total {
+                                bodyWarmProgress = (done, total)
+                            }
+                        }
+                    }
+                } catch {
+                    banner = "Couldn't load all mail for \(account.emailAddress) — \(friendly(error))"
+                }
+            }
+
+            // Say what happened. "155 processed" tells you a loop ran; the
+            // interesting number is how many bodies the app now holds that it
+            // did not before, and how much text that actually is.
+            let gained = openBodies.count - startingBodies
+            let characters = openBodies.values.reduce(0) { $0 + $1.bestText.count }
+            let failed = bodyErrors.count
+            var parts = ["\(openBodies.count) of \(total) messages have full text"]
+            if gained > 0 { parts.append("\(gained) downloaded just now") }
+            if failed > 0 { parts.append("\(failed) couldn't be read") }
+            parts.append("\(characters / 1000)k characters available to search and summarise")
+            lastWarmSummary = parts.joined(separator: " · ")
+        }
+    }
+
     /// Messages awaiting confirmation of an irreversible delete. Non-nil puts
     /// the confirmation sheet on screen.
     /// Why a body failed to load, per message. Kept apart from `openBodies` so a
@@ -78,10 +250,14 @@ final class MailStore {
 
     // MARK: - Derived
 
-    var enabledAccounts: [MailAccount] { accounts.filter(\.isEnabled).sorted { $0.sortIndex < $1.sortIndex } }
+    var enabledAccounts: [MailAccount] {
+        if demoMode { return LabSampleMail.accounts() }
+        return accounts.filter(\.isEnabled).sorted { $0.sortIndex < $1.sortIndex }
+    }
 
     var inbox: [MailMessage] {
-        enabledAccounts.flatMap { messagesByAccount[$0.id] ?? [] }
+        if demoMode { return LabSampleMail.inbox() }
+        return enabledAccounts.flatMap { messagesByAccount[$0.id] ?? [] }
             .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
     }
     var unreadCount: Int { inbox.filter { isUnread($0) }.count }
@@ -275,6 +451,7 @@ final class MailStore {
     // MARK: - Sync
 
     func sync(_ account: MailAccount) async {
+        guard !demoMode else { return }
         syncState[account.id] = .syncing
         do {
             let client = try await openIMAP(for: account)
@@ -370,6 +547,7 @@ final class MailStore {
     }
 
     func refresh() {
+        guard !demoMode else { return }
         Task {
             isSyncing = true
             // Folders first: moving to Trash/Archive/Junk needs the account's
@@ -384,7 +562,9 @@ final class MailStore {
             // Keeps the app badge honest and, more importantly, records what has
             // been seen - so mail read in the foreground is never announced by a
             // later background wake.
-            await MailNotifier.shared.announce(inbox, unreadTotal: unreadCount)
+            if !demoMode {
+                await MailNotifier.shared.announce(inbox, unreadTotal: unreadCount)
+            }
             prefetchInbox()                        // warm bodies + AI summaries in the background
             backfillSummaries()                    // ...then everything else that still lacks one
         }
@@ -501,7 +681,9 @@ final class MailStore {
         if let s = await MailAI.summarize(subject: m.subject,
                                           from: m.from.first?.shortLabel ?? "unknown", body: body) {
             summaries[m.id] = s
-            saveSummaryCache()
+            // Not persisted during a demo: those ids belong to fabricated mail
+            // and have no business in the cache that survives a launch.
+            if !demoMode { saveSummaryCache() }
             WatchBridge.shared.sync(from: self)   // push the new summary to the watch
         }
     }
