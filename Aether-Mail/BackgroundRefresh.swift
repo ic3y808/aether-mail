@@ -35,10 +35,12 @@ enum BackgroundRefresh {
 
         let work = Task { @MainActor in
             for account in store.enabledAccounts {
+                guard !Task.isCancelled else { break }
                 await store.sync(account)
             }
+            guard !Task.isCancelled else { return }
             let inbox = store.inbox
-            await MailNotifier.shared.announce(inbox, unreadTotal: store.unreadCount)
+            await MailNotifier.shared.announce(inbox, unreadTotal: store.unreadCount, blockedAddresses: store.blockedSenders)
         }
 
         // The system gives roughly 30s and kills the app if it overruns.

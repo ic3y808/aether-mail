@@ -155,10 +155,17 @@ extension MailStore {
                                      : "Deleted \(messages.count) messages permanently."
     }
 
-    // MARK: - Move
-
     func archive(_ messages: [MailMessage]) { move(messages, toRole: .archive, label: "Archive") }
-    func markAsJunk(_ messages: [MailMessage]) { move(messages, toRole: .junk, label: "Junk") }
+    func markAsJunk(_ messages: [MailMessage]) {
+        for m in messages {
+            for addr in m.from {
+                let clean = addr.address.lowercased().trimmingCharacters(in: .whitespaces)
+                if !clean.isEmpty { blockedSenders.insert(clean) }
+            }
+        }
+        persist()
+        move(messages, toRole: .junk, label: "Junk")
+    }
 
     /// Files `messages` under `role`, optimistically and reversibly.
     func move(_ messages: [MailMessage], toRole role: FolderRole, label: String) {

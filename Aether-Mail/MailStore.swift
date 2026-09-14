@@ -234,6 +234,9 @@ final class MailStore {
     var banner: String?
 
     private static let accountsKey = "com.aether.mail.accounts.v1"
+    private static let blockedSendersKey = "com.aether.mail.blockedSenders.v1"
+    var blockedSenders: Set<String> = []
+    @ObservationIgnored private var idleTasks: [UUID: Task<Void, Never>] = [:]
 
     init() {
         load()
@@ -258,6 +261,7 @@ final class MailStore {
     var inbox: [MailMessage] {
         if demoMode { return LabSampleMail.inbox() }
         return enabledAccounts.flatMap { messagesByAccount[$0.id] ?? [] }
+            .filter { !$0.flags.contains(.deleted) && !isBlocked($0) }
             .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
     }
     var unreadCount: Int { inbox.filter { isUnread($0) }.count }
@@ -270,13 +274,66 @@ final class MailStore {
     // MARK: - Persistence
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: Self.accountsKey),
-              let saved = try? JSONDecoder().decode([MailAccount].self, from: data) else { return }
-        accounts = saved
+        if let data = UserDefaults.standard.data(forKey: Self.accountsKey),
+           let saved = try? JSONDecoder().decode([MailAccount].self, from: data) {
+            accounts = saved
+        }
+        if let list = UserDefaults.standard.stringArray(forKey: Self.blockedSendersKey) {
+            blockedSenders = Set(list.map { $0.lowercased().trimmingCharacters(in: .whitespaces) })
+        }
     }
-    private func persist() {
+    func persist() {
         if let data = try? JSONEncoder().encode(accounts) {
             UserDefaults.standard.set(data, forKey: Self.accountsKey)
+        }
+        UserDefaults.standard.set(Array(blockedSenders), forKey: Self.blockedSendersKey)
+    }
+
+    // MARK: - Blocklist
+
+    func isBlocked(_ address: String) -> Bool {
+        let clean = address.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !clean.isEmpty else { return false }
+        if blockedSenders.contains(clean) { return true }
+        if let atIdx = clean.firstIndex(of: "@") {
+            let domain = String(clean[atIdx...])
+            if blockedSenders.contains(domain) { return true }
+        }
+        return false
+    }
+
+    func isBlocked(_ message: MailMessage) -> Bool {
+        message.from.contains { isBlocked($0.address) }
+    }
+
+    func blockSender(_ address: String) {
+        let clean = address.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !clean.isEmpty else { return }
+        blockedSenders.insert(clean)
+        persist()
+        enforceBlocklist()
+    }
+
+    func unblockSender(_ address: String) {
+        let clean = address.lowercased().trimmingCharacters(in: .whitespaces)
+        blockedSenders.remove(clean)
+        persist()
+    }
+
+    /// Moves any mail in INBOX from blocked senders directly into Junk.
+    func enforceBlocklist() {
+        guard !blockedSenders.isEmpty else { return }
+        for account in enabledAccounts {
+            enforceBlocklist(for: account)
+        }
+    }
+
+    func enforceBlocklist(for account: MailAccount) {
+        guard !blockedSenders.isEmpty else { return }
+        let current = messagesByAccount[account.id] ?? []
+        let spam = current.filter { isBlocked($0) }
+        if !spam.isEmpty {
+            markAsJunk(spam)
         }
     }
 
@@ -328,8 +385,21 @@ final class MailStore {
         if account.effectiveAuth == .oauth {
             let token = try await validAccessToken(for: account)
             try await client.authenticateXOAUTH2(user: account.emailAddress, accessToken: token)
-        } else if let pw = Keychain.getString(account.credentialRef) {
-            try await client.login(user: account.emailAddress, password: pw)
+        } else if let rawPw = Keychain.getString(account.credentialRef) {
+            let pw = normalizedPassword(rawPw, account.provider)
+            if account.provider == .icloud || account.provider == .proton {
+                do {
+                    try await client.authenticatePlain(user: account.emailAddress, password: pw)
+                } catch {
+                    try await client.login(user: account.emailAddress, password: pw)
+                }
+            } else {
+                do {
+                    try await client.login(user: account.emailAddress, password: pw)
+                } catch {
+                    try await client.authenticatePlain(user: account.emailAddress, password: pw)
+                }
+            }
         } else {
             throw NSError(domain: "AetherMail", code: 1, userInfo: [NSLocalizedDescriptionKey: "No saved credentials."])
         }
@@ -436,6 +506,7 @@ final class MailStore {
     }
 
     func removeAccount(_ account: MailAccount) {
+        stopIdle(for: account.id)
         Keychain.delete(account.credentialRef)
         accounts.removeAll { $0.id == account.id }
         messagesByAccount[account.id] = nil
@@ -456,7 +527,7 @@ final class MailStore {
         do {
             let client = try await openIMAP(for: account)
             let status = try await client.select("INBOX")
-            let uids = try await client.uidSearch("ALL")
+            let uids = try await client.uidSearch("UNDELETED")
             let recent = Array(uids.suffix(60))            // newest 60
             if recent.isEmpty {
                 messagesByAccount[account.id] = []
@@ -478,6 +549,7 @@ final class MailStore {
             messagesByAccount[account.id] = merged
             syncState[account.id] = .ok
             saveMessageCache()
+            enforceBlocklist(for: account)
         } catch {
             syncState[account.id] = .failed(friendly(error))
             banner = "Couldn't sync \(account.emailAddress) — \(friendly(error))"
@@ -520,7 +592,7 @@ final class MailStore {
         do {
             let client = try await openIMAP(for: account)
             let status = try await client.select(path)
-            let uids = try await client.uidSearch("ALL")
+            let uids = try await client.uidSearch("UNDELETED")
             let recent = Array(uids.suffix(60))
             let key = folderKey(account.id, path)
             if recent.isEmpty {
@@ -551,22 +623,81 @@ final class MailStore {
         Task {
             isSyncing = true
             // Folders first: moving to Trash/Archive/Junk needs the account's
-            // real server paths. This used to load only when the Mailboxes
-            // screen was opened, so until then every move guessed "Trash" -
-            // wrong for Gmail ("[Gmail]/Trash"), so the move failed and the
-            // message came straight back.
+            // real server paths.
             for a in enabledAccounts { await loadFolders(a) }
             for a in enabledAccounts { await sync(a) }
             isSyncing = false
             WatchBridge.shared.sync(from: self)   // mirror the fresh inbox to the watch
+            startAllIdle()                        // start live IMAP push for enabled accounts
             // Keeps the app badge honest and, more importantly, records what has
             // been seen - so mail read in the foreground is never announced by a
             // later background wake.
             if !demoMode {
-                await MailNotifier.shared.announce(inbox, unreadTotal: unreadCount)
+                await MailNotifier.shared.announce(inbox, unreadTotal: unreadCount, blockedAddresses: blockedSenders)
             }
             prefetchInbox()                        // warm bodies + AI summaries in the background
             backfillSummaries()                    // ...then everything else that still lacks one
+        }
+    }
+
+    // MARK: - IDLE (Push)
+
+    func startIdle(for account: MailAccount) {
+        stopIdle(for: account.id)
+        guard !demoMode, account.isEnabled else { return }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            var transientFailures = 0
+            while !Task.isCancelled {
+                do {
+                    let client = try await self.openIMAP(for: account)
+                    _ = try await client.select("INBOX")
+                    _ = try? await client.capability()
+                    guard await client.supportsIdle else {
+                        await client.disconnect()
+                        return
+                    }
+                    transientFailures = 0
+                    try await client.idle { event in
+                        switch event {
+                        case .exists, .expunge, .recent:
+                            Task { @MainActor [weak self] in
+                                guard let self else { return }
+                                await self.sync(account)
+                                if !self.demoMode {
+                                    await MailNotifier.shared.announce(self.inbox, unreadTotal: self.unreadCount, blockedAddresses: self.blockedSenders)
+                                }
+                                self.prefetchInbox()
+                            }
+                        default:
+                            break
+                        }
+                    }
+                    await client.disconnect()
+                } catch {
+                    if Task.isCancelled { break }
+                    transientFailures += 1
+                    if transientFailures >= 8 { break }
+                    try? await Task.sleep(for: .seconds(min(10 * transientFailures, 60)))
+                }
+            }
+        }
+        idleTasks[account.id] = task
+    }
+
+    func stopIdle(for accountID: UUID) {
+        idleTasks[accountID]?.cancel()
+        idleTasks[accountID] = nil
+    }
+
+    func stopAllIdle() {
+        for (_, task) in idleTasks { task.cancel() }
+        idleTasks.removeAll()
+    }
+
+    func startAllIdle() {
+        for account in enabledAccounts {
+            startIdle(for: account)
         }
     }
 

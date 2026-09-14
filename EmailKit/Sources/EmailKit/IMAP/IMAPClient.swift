@@ -182,11 +182,14 @@ public actor IMAPClient {
     public func uidSearch(_ criteria: String = "ALL") async throws -> [UInt32] {
         var uids: [UInt32] = []
         let tagged = try await execute("UID SEARCH \(criteria)") { bytes in
-            if case .search(let found)? = IMAPResponseParser.parseUntagged(bytes) { uids = found }
+            if case .search(let found)? = IMAPResponseParser.parseUntagged(bytes) {
+                uids.append(contentsOf: found)
+            }
         }
         guard tagged.status == .ok else {
             throw IMAPClientError.commandFailed(command: "SEARCH", status: tagged.status.rawValue, text: tagged.text)
         }
+        uids.sort()
         return uids
     }
 
@@ -314,7 +317,10 @@ public actor IMAPClient {
         for uid in uids {
             try await store(uid: uid, flag: "\\Deleted", add: true)
         }
-        _ = try await execute("UID EXPUNGE \(uidSet)")
+        let expungeResult = try await execute("UID EXPUNGE \(uidSet)")
+        if expungeResult.status != .ok {
+            _ = try await execute("EXPUNGE")
+        }
     }
 
     // MARK: IDLE (push)
