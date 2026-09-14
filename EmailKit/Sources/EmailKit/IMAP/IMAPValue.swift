@@ -117,7 +117,9 @@ public struct IMAPTokenizer {
         while i < bytes.count && bytes[i] != UInt8(ascii: "}") { digits.append(bytes[i]); i += 1 }
         guard i < bytes.count else { throw IMAPParseError.badLiteral }
         i += 1 // consume '}'
-        guard let count = Int(String(decoding: digits, as: UTF8.self)) else { throw IMAPParseError.badLiteral }
+        var rawCountStr = String(decoding: digits, as: UTF8.self)
+        if rawCountStr.hasSuffix("+") { rawCountStr.removeLast() }
+        guard let count = Int(rawCountStr) else { throw IMAPParseError.badLiteral }
         // Skip the CRLF (or lone LF) that follows the literal header.
         if i < bytes.count && bytes[i] == 0x0D { i += 1 }
         if i < bytes.count && bytes[i] == 0x0A { i += 1 }

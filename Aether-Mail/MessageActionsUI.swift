@@ -76,7 +76,13 @@ struct MessageMenu: View {
         Divider()
 
         Button("Archive", systemImage: "archivebox") { store.archive([message]) }
-        Button("Mark as Junk", systemImage: "xmark.bin") { store.markAsJunk([message]) }
+        if store.isBlocked(message) {
+            Button("Unblock Sender", systemImage: "hand.raised.slash") {
+                for addr in message.from { store.unblockSender(addr.address) }
+            }
+        } else {
+            Button("Mark as Junk & Block", systemImage: "xmark.bin") { store.markAsJunk([message]) }
+        }
 
         let destinations = store.moveDestinations(for: message)
         if !destinations.isEmpty {

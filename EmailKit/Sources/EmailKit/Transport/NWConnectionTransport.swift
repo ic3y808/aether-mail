@@ -70,28 +70,36 @@ public final class NWConnectionTransport: MailTransport, @unchecked Sendable {
 
     public func send(_ bytes: [UInt8]) async throws {
         guard let conn = lock.withLock({ connection }) else { throw MailTransportError.notConnected }
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            conn.send(content: Data(bytes), completion: .contentProcessed { error in
-                if let error { cont.resume(throwing: MailTransportError.connectionFailed(error.localizedDescription)) }
-                else { cont.resume() }
-            })
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                conn.send(content: Data(bytes), completion: .contentProcessed { error in
+                    if let error { cont.resume(throwing: MailTransportError.connectionFailed(error.localizedDescription)) }
+                    else { cont.resume() }
+                })
+            }
+        } onCancel: {
+            conn.cancel()
         }
     }
 
     public func receive() async throws -> [UInt8] {
         guard let conn = lock.withLock({ connection }) else { throw MailTransportError.notConnected }
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[UInt8], Error>) in
-            conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
-                if let error {
-                    cont.resume(throwing: MailTransportError.connectionFailed(error.localizedDescription))
-                } else if let data, !data.isEmpty {
-                    cont.resume(returning: [UInt8](data))
-                } else if isComplete {
-                    cont.resume(returning: [])
-                } else {
-                    cont.resume(returning: [])
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[UInt8], Error>) in
+                conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+                    if let error {
+                        cont.resume(throwing: MailTransportError.connectionFailed(error.localizedDescription))
+                    } else if let data, !data.isEmpty {
+                        cont.resume(returning: [UInt8](data))
+                    } else if isComplete {
+                        cont.resume(returning: [])
+                    } else {
+                        cont.resume(returning: [])
+                    }
                 }
             }
+        } onCancel: {
+            conn.cancel()
         }
     }
 

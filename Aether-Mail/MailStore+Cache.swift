@@ -51,7 +51,7 @@ extension MailStore {
                                  serverValidity: serverValidity)
         uidValidityByFolder[key] = serverValidity ?? uidValidityByFolder[key]
 
-        var byUID = Dictionary(uniqueKeysWithValues: cached.map { ($0.uid, $0) })
+        var byUID = Dictionary(cached.map { ($0.uid, $0) }, uniquingKeysWith: { _, new in new })
 
         // Whatever the plan drops is gone from this folder: either the server no
         // longer lists it, or UIDVALIDITY changed and the UID now means something
@@ -63,11 +63,13 @@ extension MailStore {
         }
 
         if !plan.toFetch.isEmpty {
-            let set = plan.toFetch.map(String.init).joined(separator: ",")
-            for var m in try await client.fetchSummaries(uidSet: set) {
-                m.accountID = accountID
-                m.folderPath = path
-                byUID[m.uid] = m
+            for chunk in stride(from: 0, to: plan.toFetch.count, by: 25).map({ Array(plan.toFetch[$0..<min($0 + 25, plan.toFetch.count)]) }) {
+                let set = chunk.map(String.init).joined(separator: ",")
+                for var m in try await client.fetchSummaries(uidSet: set) {
+                    m.accountID = accountID
+                    m.folderPath = path
+                    byUID[m.uid] = m
+                }
             }
         }
 

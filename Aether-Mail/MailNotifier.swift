@@ -11,7 +11,7 @@ import EmailKit
 /// server-side watcher holding IDLE per account - a separate build, and this
 /// works with no infrastructure at all.
 @MainActor
-final class MailNotifier {
+final class MailNotifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = MailNotifier()
 
     /// Message ids already announced, so a re-sync of the same mail is silent.
@@ -27,7 +27,19 @@ final class MailNotifier {
         }
     }
 
-    private init() {}
+    private override init() {
+        super.init()
+        UNUserNotificationCenter.current().delegate = self
+    }
+
+    /// Presents banners, sounds and badges even while the app is active in the foreground.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound, .badge, .list])
+    }
 
     /// Asks once. A refusal is remembered by the system, so this is safe to call
     /// on every launch.
@@ -50,14 +62,24 @@ final class MailNotifier {
     /// track state: what is new is decided here, against what was announced.
     /// Returns how many notifications were posted.
     @discardableResult
-    func announce(_ messages: [MailMessage], unreadTotal: Int) async -> Int {
+    func announce(_ messages: [MailMessage], unreadTotal: Int, blockedAddresses: Set<String> = []) async -> Int {
         guard await isAuthorized else { return 0 }
 
         var seen = announced
         // Newest first, and never more than a handful at once - waking up to
         // twenty separate banners for one sync is worse than a summary.
         let fresh = messages
-            .filter { $0.isUnread && !seen.contains($0.id) }
+            .filter { m in
+                guard m.isUnread && !seen.contains(m.id) else { return false }
+                if !blockedAddresses.isEmpty {
+                    for addr in m.from {
+                        let clean = addr.address.lowercased().trimmingCharacters(in: .whitespaces)
+                        if blockedAddresses.contains(clean) { return false }
+                        if let at = clean.firstIndex(of: "@"), blockedAddresses.contains(String(clean[at...])) { return false }
+                    }
+                }
+                return true
+            }
             .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
 
         guard !fresh.isEmpty else {

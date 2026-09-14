@@ -9,3 +9,9 @@ DerivedData/
 *.xcuserstate
 .DS_Store
 Aether-Mail/OAuthClients.plist
+
+# Development sign-in for the Simulator. The REAL file lives at
+# ~/.aether-mail-dev.json on the Mac, outside this repository entirely - this
+# entry only guards against a copy being dropped in here by mistake. This repo
+# is public; never commit credentials to it.
+.aether-mail-dev.json
