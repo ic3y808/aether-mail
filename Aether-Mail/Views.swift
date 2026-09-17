@@ -32,7 +32,7 @@ struct RootView: View {
                             }
                             ToolbarItem(placement: .topBarTrailing) {
                                 if store.isSyncing { ProgressView() }
-                                else { Button { store.refresh() } label: { Image(systemName: "arrow.clockwise") } }
+                                else { Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") } }
                             }
                         }
                         .toolbarBackground(.hidden, for: .navigationBar)
@@ -130,7 +130,7 @@ struct InboxView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .refreshable { store.refresh(); try? await Task.sleep(for: .milliseconds(500)) }
+        .refreshable { await store.refresh() }
         .overlay {
             if visible.isEmpty && !store.isSyncing && !store.hasSyncErrors {
                 if unreadOnly && !store.inbox.isEmpty {

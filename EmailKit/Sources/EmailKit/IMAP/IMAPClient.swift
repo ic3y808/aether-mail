@@ -325,12 +325,23 @@ public actor IMAPClient {
 
     // MARK: IDLE (push)
 
-    /// Enters IDLE and forwards untagged events until the task is cancelled.
-    /// On cancellation a `DONE` is sent so the server ends IDLE cleanly. The
-    /// caller reacts to `.exists`/`.expunge` by re-fetching new UIDs.
-    public func idle(onEvent: @escaping @Sendable (IMAPUntagged) -> Void) async throws {
+    /// Enters IDLE and forwards untagged events until the task is cancelled or
+    /// maxDuration is reached (RFC 2177 recommends re-idling at least every 29 minutes).
+    /// On cancellation or renewal a `DONE` is sent so the server ends IDLE cleanly.
+    public func idle(maxDuration: TimeInterval? = 20 * 60,
+                     onEvent: @escaping @Sendable (IMAPUntagged) -> Void) async throws {
         let tag = nextTag()
         try await transport.send("\(tag) IDLE\r\n")
+        var timerTask: Task<Void, Never>?
+        if let maxDuration, maxDuration > 0 {
+            timerTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(maxDuration))
+                if !Task.isCancelled {
+                    await self?.sendRaw("DONE\r\n")
+                }
+            }
+        }
+        defer { timerTask?.cancel() }
         try await withTaskCancellationHandler {
             while true {
                 try Task.checkCancellation()

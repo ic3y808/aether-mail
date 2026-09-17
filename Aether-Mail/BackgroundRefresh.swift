@@ -4,48 +4,52 @@ import EmailKit
 
 /// Wakes the app periodically to check for mail.
 ///
-/// iOS decides when - it learns from how the owner uses the app, so this is
-/// minutes-to-an-hour, not instant. A task must reschedule itself before it
-/// finishes or it never runs again, and it must call setTaskCompleted or the
-/// system stops trusting the app with background time at all.
+/// Supports both BGAppRefreshTask (for quick opportunistic checks) and
+/// BGProcessingTask (for deeper sync and body prefetching when charging/idle).
 @MainActor
 enum BackgroundRefresh {
-    static let identifier = "com.aether.mail.refresh"
+    static let refreshIdentifier = "com.aether.mail.refresh"
+    static let processingIdentifier = "com.aether.mail.processing"
 
     /// Registered before the app finishes launching, which the system requires.
     static func register(store: MailStore) {
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { task in
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: refreshIdentifier, using: nil) { task in
             guard let task = task as? BGAppRefreshTask else { return }
+            Task { @MainActor in await run(task, store: store) }
+        }
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: processingIdentifier, using: nil) { task in
+            guard let task = task as? BGProcessingTask else { return }
             Task { @MainActor in await run(task, store: store) }
         }
     }
 
     static func schedule() {
-        let request = BGAppRefreshTaskRequest(identifier: identifier)
-        // A floor, not a promise: iOS will not run it sooner, and may run it
-        // much later or not at all if the app is rarely opened.
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
-        try? BGTaskScheduler.shared.submit(request)
+        // Schedule opportunistic app refresh
+        let refreshRequest = BGAppRefreshTaskRequest(identifier: refreshIdentifier)
+        refreshRequest.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        try? BGTaskScheduler.shared.submit(refreshRequest)
+
+        // Schedule background processing
+        let processingRequest = BGProcessingTaskRequest(identifier: processingIdentifier)
+        processingRequest.earliestBeginDate = Date(timeIntervalSinceNow: 45 * 60)
+        processingRequest.requiresNetworkConnectivity = true
+        processingRequest.requiresExternalPower = false
+        try? BGTaskScheduler.shared.submit(processingRequest)
     }
 
-    private static func run(_ task: BGAppRefreshTask, store: MailStore) async {
-        // Always queue the next one first. Doing it at the end means a crash or
-        // an expiry silently ends background refresh for good.
+    private static func run(_ task: BGTask, store: MailStore) async {
+        // Always queue the next run first
         schedule()
 
         let work = Task { @MainActor in
-            for account in store.enabledAccounts {
-                guard !Task.isCancelled else { break }
-                await store.sync(account)
-            }
-            guard !Task.isCancelled else { return }
+            await store.refresh()
             let inbox = store.inbox
             await MailNotifier.shared.announce(inbox, unreadTotal: store.unreadCount, blockedAddresses: store.blockedSenders)
         }
 
-        // The system gives roughly 30s and kills the app if it overruns.
+        // The system kills the app if it overruns (~30s for refresh)
         task.expirationHandler = { work.cancel() }
         _ = await work.result
-        task.setTaskCompleted(success: true)
+        task.setTaskCompleted(success: !work.isCancelled)
     }
 }

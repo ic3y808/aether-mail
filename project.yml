@@ -60,8 +60,10 @@ targets:
         # works against any provider the app already talks to.
         UIBackgroundModes:
           - fetch
+          - processing
         BGTaskSchedulerPermittedIdentifiers:
           - com.aether.mail.refresh
+          - com.aether.mail.processing
         UILaunchScreen:
           UIColorName: ""
         UISupportedInterfaceOrientations:

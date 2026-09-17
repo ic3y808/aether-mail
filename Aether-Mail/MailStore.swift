@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import Network
 import EmailKit
 
 /// Real multi-account state for Aether Mail. Accounts persist to UserDefaults;
@@ -63,7 +64,7 @@ final class MailStore {
                     // Back to reality: pick up whatever arrived meanwhile.
                     // Nothing to tear down going the other way - sync() and
                     // refresh() both return early while a demo is on.
-                    refresh()
+                    await refresh()
                 }
             }
         }
@@ -237,17 +238,22 @@ final class MailStore {
     private static let blockedSendersKey = "com.aether.mail.blockedSenders.v1"
     var blockedSenders: Set<String> = []
     @ObservationIgnored private var idleTasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var currentSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var pathMonitor: NWPathMonitor?
+    @ObservationIgnored private var pathMonitorQueue = DispatchQueue(label: "com.aether.mail.networkMonitor")
+    @ObservationIgnored private var isNetworkSatisfied = true
 
     init() {
         load()
         WatchBridge.shared.activate()             // start the paired-watch link
         isAddingAccount = accounts.isEmpty        // onboarding when there are none
+        startNetworkMonitor()
         // Paint from disk first, then sync. Going straight to the network showed
         // an empty inbox for as long as the fetch took, every single launch, for
         // mail that was already on the device.
         Task { @MainActor in
             await restoreCache()
-            if !accounts.isEmpty { refresh() }
+            if !accounts.isEmpty { await refresh() }
         }
     }
 
@@ -618,15 +624,31 @@ final class MailStore {
         }
     }
 
-    func refresh() {
+    /// Pulls latest messages and folders for all enabled accounts.
+    /// Deduplicates concurrent invocations so parallel calls join the active in-flight sync.
+    @discardableResult
+    func refresh() async {
         guard !demoMode else { return }
-        Task {
+        if let existing = currentSyncTask {
+            await existing.value
+            return
+        }
+        let task = Task { @MainActor in
+            defer {
+                isSyncing = false
+                currentSyncTask = nil
+            }
             isSyncing = true
             // Folders first: moving to Trash/Archive/Junk needs the account's
             // real server paths.
-            for a in enabledAccounts { await loadFolders(a) }
-            for a in enabledAccounts { await sync(a) }
-            isSyncing = false
+            for a in enabledAccounts {
+                guard !Task.isCancelled else { return }
+                await loadFolders(a)
+            }
+            for a in enabledAccounts {
+                guard !Task.isCancelled else { return }
+                await sync(a)
+            }
             WatchBridge.shared.sync(from: self)   // mirror the fresh inbox to the watch
             startAllIdle()                        // start live IMAP push for enabled accounts
             // Keeps the app badge honest and, more importantly, records what has
@@ -637,6 +659,15 @@ final class MailStore {
             }
             prefetchInbox()                        // warm bodies + AI summaries in the background
             backfillSummaries()                    // ...then everything else that still lacks one
+        }
+        currentSyncTask = task
+        await task.value
+    }
+
+    /// Convenience for callers in synchronous contexts.
+    func triggerRefresh() {
+        Task { @MainActor in
+            await self.refresh()
         }
     }
 
@@ -658,7 +689,8 @@ final class MailStore {
                         return
                     }
                     transientFailures = 0
-                    try await client.idle { event in
+                    // Idle with RFC 2177 periodic renewal every 15 minutes
+                    try await client.idle(maxDuration: 15 * 60) { event in
                         switch event {
                         case .exists, .expunge, .recent:
                             Task { @MainActor [weak self] in
@@ -677,8 +709,8 @@ final class MailStore {
                 } catch {
                     if Task.isCancelled { break }
                     transientFailures += 1
-                    if transientFailures >= 8 { break }
-                    try? await Task.sleep(for: .seconds(min(10 * transientFailures, 60)))
+                    let backoff = min(5 * transientFailures, 60)
+                    try? await Task.sleep(for: .seconds(backoff))
                 }
             }
         }
@@ -859,5 +891,23 @@ final class MailStore {
             return "Couldn't reach the server. Check the host and your connection."
         }
         return error.localizedDescription
+    }
+
+    private func startNetworkMonitor() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let satisfied = path.status == .satisfied
+                let wasSatisfied = self.isNetworkSatisfied
+                self.isNetworkSatisfied = satisfied
+                if satisfied && !wasSatisfied {
+                    await self.refresh()
+                    self.startAllIdle()
+                }
+            }
+        }
+        monitor.start(queue: pathMonitorQueue)
+        self.pathMonitor = monitor
     }
 }

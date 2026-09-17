@@ -18,6 +18,12 @@ public final class NWConnectionTransport: MailTransport, @unchecked Sendable {
     }
 
     public func connect() async throws {
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 60
+        tcp.keepaliveInterval = 30
+        tcp.keepaliveCount = 5
+
         let params: NWParameters
         switch endpoint.security {
         case .implicitTLS:
@@ -26,9 +32,9 @@ public final class NWConnectionTransport: MailTransport, @unchecked Sendable {
             // check). Network.framework validates the chain against the system
             // trust store by default.
             sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, endpoint.host)
-            params = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+            params = NWParameters(tls: tls, tcp: tcp)
         case .plaintext:
-            params = NWParameters(tls: nil, tcp: NWProtocolTCP.Options())
+            params = NWParameters(tls: nil, tcp: tcp)
         case .startTLS:
             // A STARTTLS endpoint starts life in plaintext; the upgrade would
             // happen after the protocol greeting. NWConnection cannot upgrade
