@@ -27,6 +27,8 @@ struct AetherMailApp: App {
                     // a rebuild does not mean retyping an app password.
                     await DevBootstrap.run(store: store)
                     await MailNotifier.shared.requestAuthorization()
+                    // Schedule background checks with iOS right away
+                    BackgroundRefresh.schedule()
                     // A fresh install must not fire a banner for every message
                     // already sitting in the inbox - the first sync is the
                     // baseline, not news.

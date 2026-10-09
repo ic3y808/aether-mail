@@ -62,7 +62,12 @@ final class MailNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// track state: what is new is decided here, against what was announced.
     /// Returns how many notifications were posted.
     @discardableResult
-    func announce(_ messages: [MailMessage], unreadTotal: Int, blockedAddresses: Set<String> = []) async -> Int {
+    func announce(
+        _ messages: [MailMessage],
+        unreadTotal: Int,
+        blockedAddresses: Set<String> = [],
+        blockedChecker: ((MailMessage) -> Bool)? = nil
+    ) async -> Int {
         guard await isAuthorized else { return 0 }
 
         var seen = announced
@@ -71,11 +76,27 @@ final class MailNotifier: NSObject, UNUserNotificationCenterDelegate {
         let fresh = messages
             .filter { m in
                 guard m.isUnread && !seen.contains(m.id) else { return false }
+                if let checker = blockedChecker, checker(m) { return false }
                 if !blockedAddresses.isEmpty {
                     for addr in m.from {
-                        let clean = addr.address.lowercased().trimmingCharacters(in: .whitespaces)
+                        var clean = addr.address.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                        if let s = clean.firstIndex(of: "<"), let e = clean.lastIndex(of: ">"), s < e {
+                            clean = String(clean[clean.index(after: s)..<e])
+                        }
+                        clean = clean.trimmingCharacters(in: CharacterSet(charactersIn: "\"' <>\t\r\n"))
                         if blockedAddresses.contains(clean) { return false }
-                        if let at = clean.firstIndex(of: "@"), blockedAddresses.contains(String(clean[at...])) { return false }
+                        if let at = clean.firstIndex(of: "@") {
+                            let domain = String(clean[at...])
+                            if blockedAddresses.contains(domain) { return false }
+                            let bareDomain = String(clean[clean.index(after: at)...])
+                            if blockedAddresses.contains(bareDomain) { return false }
+                            for b in blockedAddresses {
+                                let bare = b.hasPrefix("@") ? String(b.dropFirst()) : b
+                                if !bare.isEmpty && (bareDomain == bare || bareDomain.hasSuffix("." + bare)) {
+                                    return false
+                                }
+                            }
+                        }
                     }
                 }
                 return true
@@ -126,6 +147,11 @@ final class MailNotifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     var hasAnnouncedAnything: Bool { !announced.isEmpty }
+
+    /// Sets the application icon badge count.
+    func updateBadge(_ count: Int) async {
+        await setBadge(count)
+    }
 
     private func setBadge(_ count: Int) async {
         try? await UNUserNotificationCenter.current().setBadgeCount(max(0, count))

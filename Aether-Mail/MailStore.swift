@@ -297,32 +297,73 @@ final class MailStore {
 
     // MARK: - Blocklist
 
+    /// Known free/public webmail domains that shouldn't be blocked as entire domains.
+    static let publicWebmailDomains: Set<String> = [
+        "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "outlook.com",
+        "hotmail.com", "live.com", "msn.com", "icloud.com", "me.com", "mac.com",
+        "proton.me", "protonmail.com", "aol.com", "mail.com", "zoho.com"
+    ]
+
+    /// Sanitizes an email address string (strips <...>, quotes, spaces, lowercase).
+    static func cleanAddress(_ raw: String) -> String {
+        var str = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let start = str.firstIndex(of: "<"), let end = str.lastIndex(of: ">"), start < end {
+            str = String(str[str.index(after: start)..<end])
+        }
+        return str.trimmingCharacters(in: CharacterSet(charactersIn: "\"' <>\t\r\n"))
+    }
+
+    /// Extracts domain from an address string (e.g. "foo@bar.com" -> "bar.com").
+    static func extractDomain(from address: String) -> String? {
+        let clean = cleanAddress(address)
+        guard let at = clean.firstIndex(of: "@") else { return nil }
+        let d = String(clean[clean.index(after: at)...]).trimmingCharacters(in: .whitespaces)
+        return d.isEmpty ? nil : d
+    }
+
     func isBlocked(_ address: String) -> Bool {
-        let clean = address.lowercased().trimmingCharacters(in: .whitespaces)
+        let clean = Self.cleanAddress(address)
         guard !clean.isEmpty else { return false }
         if blockedSenders.contains(clean) { return true }
-        if let atIdx = clean.firstIndex(of: "@") {
-            let domain = String(clean[atIdx...])
-            if blockedSenders.contains(domain) { return true }
+        guard let domain = Self.extractDomain(from: clean) else { return false }
+        if blockedSenders.contains("@" + domain) || blockedSenders.contains(domain) {
+            return true
+        }
+        for blocked in blockedSenders {
+            let bare = blocked.hasPrefix("@") ? String(blocked.dropFirst()) : blocked
+            if !bare.isEmpty && (domain == bare || domain.hasSuffix("." + bare)) {
+                return true
+            }
         }
         return false
     }
 
     func isBlocked(_ message: MailMessage) -> Bool {
-        message.from.contains { isBlocked($0.address) }
+        guard !blockedSenders.isEmpty else { return false }
+        if message.from.contains(where: { isBlocked($0.address) }) {
+            return true
+        }
+        return false
     }
 
     func blockSender(_ address: String) {
-        let clean = address.lowercased().trimmingCharacters(in: .whitespaces)
+        let clean = Self.cleanAddress(address)
         guard !clean.isEmpty else { return }
         blockedSenders.insert(clean)
+        if let domain = Self.extractDomain(from: clean), !Self.publicWebmailDomains.contains(domain) {
+            blockedSenders.insert("@" + domain)
+        }
         persist()
         enforceBlocklist()
     }
 
     func unblockSender(_ address: String) {
-        let clean = address.lowercased().trimmingCharacters(in: .whitespaces)
+        let clean = Self.cleanAddress(address)
         blockedSenders.remove(clean)
+        if let domain = Self.extractDomain(from: clean) {
+            blockedSenders.remove("@" + domain)
+            blockedSenders.remove(domain)
+        }
         persist()
     }
 
@@ -552,10 +593,18 @@ final class MailStore {
                 path: "INBOX"
             )
             await client.disconnect()
-            messagesByAccount[account.id] = merged
+            let clean = merged.filter { !isBlocked($0) }
+            messagesByAccount[account.id] = clean
+            let folderK = folderKey(account.id, "INBOX")
+            messagesByFolder[folderK] = (messagesByFolder[folderK] ?? []).filter { !isBlocked($0) }
             syncState[account.id] = .ok
             saveMessageCache()
-            enforceBlocklist(for: account)
+            let spam = merged.filter { isBlocked($0) }
+            if !spam.isEmpty {
+                markAsJunk(spam)
+            } else {
+                enforceBlocklist(for: account)
+            }
         } catch {
             syncState[account.id] = .failed(friendly(error))
             banner = "Couldn't sync \(account.emailAddress) — \(friendly(error))"
@@ -569,8 +618,9 @@ final class MailStore {
 
     /// Messages currently loaded for a specific folder, newest first.
     func messages(_ account: UUID, _ path: String) -> [MailMessage] {
-        (messagesByFolder[folderKey(account, path)] ?? [])
-            .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+        let list = messagesByFolder[folderKey(account, path)] ?? []
+        let filtered = (path == "INBOX") ? list.filter { !$0.flags.contains(.deleted) && !isBlocked($0) } : list
+        return filtered.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
     }
 
     /// Load the IMAP folder list for an account (used by the Mailboxes screen).
@@ -652,16 +702,63 @@ final class MailStore {
             WatchBridge.shared.sync(from: self)   // mirror the fresh inbox to the watch
             startAllIdle()                        // start live IMAP push for enabled accounts
             // Keeps the app badge honest and, more importantly, records what has
-            // been seen - so mail read in the foreground is never announced by a
-            // later background wake.
+            // been seen in the foreground so it is never announced by a later background wake.
             if !demoMode {
-                await MailNotifier.shared.announce(inbox, unreadTotal: unreadCount, blockedAddresses: blockedSenders)
+                MailNotifier.shared.suppress(inbox)
+                await MailNotifier.shared.updateBadge(unreadCount)
             }
             prefetchInbox()                        // warm bodies + AI summaries in the background
             backfillSummaries()                    // ...then everything else that still lacks one
         }
         currentSyncTask = task
         await task.value
+    }
+
+    /// Fast, lightweight background check designed for BGAppRefreshTask.
+    /// Connects to INBOX for enabled accounts, fetches any newly arrived UIDs,
+    /// enforces blocklist, and announces unread mail. Completes in 1-3 seconds.
+    func backgroundQuickSync() async -> Int {
+        guard !demoMode, !enabledAccounts.isEmpty else { return 0 }
+        for account in enabledAccounts {
+            do {
+                let client = try await openIMAP(for: account)
+                let status = try await client.select("INBOX")
+                let uids = try await client.uidSearch("UNDELETED")
+                let recent = Array(uids.suffix(60))
+                if !recent.isEmpty {
+                    let key = folderKey(account.id, "INBOX")
+                    let cached = messagesByAccount[account.id] ?? []
+                    let merged = try await mergeIncrementally(
+                        client: client,
+                        cached: cached,
+                        key: key,
+                        serverValidity: status.uidValidity,
+                        wantedUIDs: recent,
+                        accountID: account.id,
+                        path: "INBOX"
+                    )
+                    let clean = merged.filter { !isBlocked($0) }
+                    messagesByAccount[account.id] = clean
+                    saveMessageCache()
+                    let spam = merged.filter { isBlocked($0) }
+                    if !spam.isEmpty {
+                        markAsJunk(spam)
+                    }
+                }
+                await client.disconnect()
+            } catch {
+                // Non-fatal per-account failure during background check
+            }
+        }
+
+        let announced = await MailNotifier.shared.announce(
+            inbox,
+            unreadTotal: unreadCount,
+            blockedAddresses: blockedSenders,
+            blockedChecker: { [weak self] m in self?.isBlocked(m) ?? false }
+        )
+        WatchBridge.shared.sync(from: self)
+        return announced
     }
 
     /// Convenience for callers in synchronous contexts.

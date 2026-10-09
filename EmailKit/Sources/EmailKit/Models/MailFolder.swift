@@ -75,7 +75,7 @@ public enum FolderRole: String, Codable, Sendable {
         if n.contains("sent") { return .sent }
         if n.contains("draft") { return .drafts }
         if n.contains("trash") || n.contains("deleted") { return .trash }
-        if n.contains("junk") || n.contains("spam") { return .junk }
+        if n.contains("junk") || n.contains("spam") || n.contains("bulk") { return .junk }
         if n.contains("archive") { return .archive }
         if n == "all mail" || n.contains("all mail") { return .all }
         return .other
@@ -128,14 +128,27 @@ extension MailFolder {
         let names: [FolderRole: [String]] = [
             .trash:   ["Trash", "Deleted Messages", "Deleted Items", "Bin"],
             .archive: ["Archive", "Archives", "All Mail"],
-            .junk:    ["Junk", "Spam", "Junk E-mail", "Bulk Mail"],
+            .junk:    ["Junk", "Spam", "Junk E-mail", "Junk Email", "Junk Mail", "Bulk Mail", "Bulk", "Spam Messages"],
             .sent:    ["Sent", "Sent Messages", "Sent Items"],
             .drafts:  ["Drafts", "Draft"]
         ]
-        guard let candidates = names[role] else { return nil }
-        return folders.first { folder in
+        if let candidates = names[role], let match = folders.first(where: { folder in
             candidates.contains { $0.caseInsensitiveCompare(folder.leafName) == .orderedSame }
+        }) {
+            return match
         }
+
+        // Loose substring fallback for junk/spam if exact leaf name didn't match
+        if role == .junk {
+            if let loose = folders.first(where: {
+                let lower = $0.leafName.lowercased()
+                return lower.contains("junk") || lower.contains("spam") || lower.contains("bulk")
+            }) {
+                return loose
+            }
+        }
+
+        return nil
     }
 
     /// Last component of the IMAP path — `Trash` for `[Gmail]/Trash`.

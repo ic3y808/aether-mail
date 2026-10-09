@@ -77,7 +77,7 @@ struct MessageMenu: View {
 
         Button("Archive", systemImage: "archivebox") { store.archive([message]) }
         if store.isBlocked(message) {
-            Button("Unblock Sender", systemImage: "hand.raised.slash") {
+            Button("Unblock Sender & Domain", systemImage: "hand.raised.slash") {
                 for addr in message.from { store.unblockSender(addr.address) }
             }
         } else {

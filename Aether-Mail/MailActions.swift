@@ -68,15 +68,27 @@ extension MailStore {
         let names: [FolderRole: [String]] = [
             .trash:   ["Trash", "Deleted Messages", "Deleted Items", "Bin"],
             .archive: ["Archive", "All Mail", "Archives"],
-            .junk:    ["Junk", "Spam", "Junk E-mail", "Bulk Mail"]
+            .junk:    ["Junk", "Spam", "Junk E-mail", "Junk Email", "Junk Mail", "Bulk Mail", "Bulk", "Spam Messages"]
         ]
-        guard let candidates = names[role] else { return nil }
-        return folders.first { folder in
+        if let candidates = names[role], let match = (folders.first { folder in
             let leaf = folder.path
                 .components(separatedBy: CharacterSet(charactersIn: "/."))
                 .last ?? folder.path
             return candidates.contains { $0.caseInsensitiveCompare(leaf) == .orderedSame }
-        }?.path
+        }?.path) {
+            return match
+        }
+
+        // Substring fallback for junk/spam if exact leaf name didn't match
+        if role == .junk {
+            if let loose = folders.first(where: {
+                let leaf = ($0.path.components(separatedBy: CharacterSet(charactersIn: "/.")).last ?? $0.path).lowercased()
+                return leaf.contains("junk") || leaf.contains("spam") || leaf.contains("bulk")
+            })?.path {
+                return loose
+            }
+        }
+        return nil
     }
 
     /// Guarantees the folder list for `account` is loaded before it is consulted.
@@ -159,8 +171,13 @@ extension MailStore {
     func markAsJunk(_ messages: [MailMessage]) {
         for m in messages {
             for addr in m.from {
-                let clean = addr.address.lowercased().trimmingCharacters(in: .whitespaces)
-                if !clean.isEmpty { blockedSenders.insert(clean) }
+                let clean = Self.cleanAddress(addr.address)
+                guard !clean.isEmpty else { continue }
+                blockedSenders.insert(clean)
+                if let domain = Self.extractDomain(from: clean),
+                   !Self.publicWebmailDomains.contains(domain) {
+                    blockedSenders.insert("@" + domain)
+                }
             }
         }
         persist()
@@ -181,7 +198,17 @@ extension MailStore {
                 guard let account = account(for: m) else { continue }
                 await ensureFolders(account)
 
-                guard let target = resolveFolder(account, role: role) else {
+                var target = resolveFolder(account, role: role)
+                if target == nil && role == .junk {
+                    // Auto-create "Junk" mailbox on the server so junking never fails
+                    if let client = try? await openIMAP(for: account) {
+                        _ = try? await client.createFolder("Junk")
+                        await client.disconnect()
+                        await loadFolders(account, force: true)
+                        target = resolveFolder(account, role: role)
+                    }
+                }
+                guard let target else {
                     if complained.insert(account.id).inserted {
                         banner = "\(account.emailAddress) has no \(label) folder."
                     }

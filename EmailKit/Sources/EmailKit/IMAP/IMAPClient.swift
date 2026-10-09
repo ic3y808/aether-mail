@@ -289,6 +289,11 @@ public actor IMAPClient {
         }
     }
 
+    /// Alias for createMailbox.
+    public func createFolder(_ path: String) async throws {
+        try await createMailbox(path)
+    }
+
     /// Deletes a mailbox/folder.
     public func deleteMailbox(_ path: String) async throws {
         let tagged = try await execute("DELETE \(quoted(path))")
@@ -307,10 +312,19 @@ public actor IMAPClient {
     public func move(uids: [UInt32], to folder: String) async throws {
         guard !uids.isEmpty else { return }
         let uidSet = uids.map(String.init).joined(separator: ",")
-        let moved = try await execute("UID MOVE \(uidSet) \(quoted(folder))")
+        var moved = try await execute("UID MOVE \(uidSet) \(quoted(folder))")
+        if moved.status != .ok && (moved.text.localizedCaseInsensitiveContains("trycreate") || moved.text.localizedCaseInsensitiveContains("exist")) {
+            _ = try? await createMailbox(folder)
+            moved = try await execute("UID MOVE \(uidSet) \(quoted(folder))")
+        }
         if moved.status == .ok { return }
+
         // Fallback for servers lacking the MOVE extension.
-        let copy = try await execute("UID COPY \(uidSet) \(quoted(folder))")
+        var copy = try await execute("UID COPY \(uidSet) \(quoted(folder))")
+        if copy.status != .ok && (copy.text.localizedCaseInsensitiveContains("trycreate") || copy.text.localizedCaseInsensitiveContains("exist")) {
+            _ = try? await createMailbox(folder)
+            copy = try await execute("UID COPY \(uidSet) \(quoted(folder))")
+        }
         guard copy.status == .ok else {
             throw IMAPClientError.commandFailed(command: "COPY", status: copy.status.rawValue, text: copy.text)
         }

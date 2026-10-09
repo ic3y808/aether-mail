@@ -24,27 +24,31 @@ enum BackgroundRefresh {
     }
 
     static func schedule() {
-        // Schedule opportunistic app refresh
+        // Schedule opportunistic app refresh (every 10-15 minutes)
         let refreshRequest = BGAppRefreshTaskRequest(identifier: refreshIdentifier)
-        refreshRequest.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        refreshRequest.earliestBeginDate = Date(timeIntervalSinceNow: 10 * 60)
         try? BGTaskScheduler.shared.submit(refreshRequest)
 
-        // Schedule background processing
+        // Schedule background processing for deeper sync and prefetching
         let processingRequest = BGProcessingTaskRequest(identifier: processingIdentifier)
-        processingRequest.earliestBeginDate = Date(timeIntervalSinceNow: 45 * 60)
+        processingRequest.earliestBeginDate = Date(timeIntervalSinceNow: 30 * 60)
         processingRequest.requiresNetworkConnectivity = true
         processingRequest.requiresExternalPower = false
         try? BGTaskScheduler.shared.submit(processingRequest)
     }
 
     private static func run(_ task: BGTask, store: MailStore) async {
-        // Always queue the next run first
+        // Always queue the next run first so iOS has a pending request
         schedule()
 
         let work = Task { @MainActor in
-            await store.refresh()
-            let inbox = store.inbox
-            await MailNotifier.shared.announce(inbox, unreadTotal: store.unreadCount, blockedAddresses: store.blockedSenders)
+            if task is BGAppRefreshTask {
+                // Lean 1-2s check: INBOX only, no heavy folders or AI, announces immediately
+                _ = await store.backgroundQuickSync()
+            } else {
+                // Deeper processing task (allowed more runtime)
+                await store.refresh()
+            }
         }
 
         // The system kills the app if it overruns (~30s for refresh)
