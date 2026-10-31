@@ -243,7 +243,10 @@ final class MailStore {
     @ObservationIgnored private var pathMonitorQueue = DispatchQueue(label: "com.aether.mail.networkMonitor")
     @ObservationIgnored private var isNetworkSatisfied = true
 
+    static weak var current: MailStore?
+
     init() {
+        Self.current = self
         load()
         WatchBridge.shared.activate()             // start the paired-watch link
         isAddingAccount = accounts.isEmpty        // onboarding when there are none
@@ -719,6 +722,9 @@ final class MailStore {
     /// enforces blocklist, and announces unread mail. Completes in 1-3 seconds.
     func backgroundQuickSync() async -> Int {
         guard !demoMode, !enabledAccounts.isEmpty else { return 0 }
+        if !cacheRestored {
+            await restoreCache()
+        }
         for account in enabledAccounts {
             do {
                 let client = try await openIMAP(for: account)
@@ -757,6 +763,29 @@ final class MailStore {
             blockedAddresses: blockedSenders,
             blockedChecker: { [weak self] m in self?.isBlocked(m) ?? false }
         )
+        WatchBridge.shared.sync(from: self)
+        return announced
+    }
+
+    /// Background processing task: performs deeper sync of folders and accounts,
+    /// and announces any fresh unread mail (unlike foreground refresh which suppresses).
+    func backgroundDeepSync() async -> Int {
+        guard !demoMode, !enabledAccounts.isEmpty else { return 0 }
+        if !cacheRestored {
+            await restoreCache()
+        }
+        for a in enabledAccounts {
+            guard !Task.isCancelled else { return 0 }
+            await loadFolders(a)
+            await sync(a)
+        }
+        let announced = await MailNotifier.shared.announce(
+            inbox,
+            unreadTotal: unreadCount,
+            blockedAddresses: blockedSenders,
+            blockedChecker: { [weak self] m in self?.isBlocked(m) ?? false }
+        )
+        prefetchInbox()
         WatchBridge.shared.sync(from: self)
         return announced
     }

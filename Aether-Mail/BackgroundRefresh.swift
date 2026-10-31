@@ -24,17 +24,25 @@ enum BackgroundRefresh {
     }
 
     static func schedule() {
-        // Schedule opportunistic app refresh (every 10-15 minutes)
+        // Schedule opportunistic app refresh (every 5-15 minutes)
         let refreshRequest = BGAppRefreshTaskRequest(identifier: refreshIdentifier)
-        refreshRequest.earliestBeginDate = Date(timeIntervalSinceNow: 10 * 60)
-        try? BGTaskScheduler.shared.submit(refreshRequest)
+        refreshRequest.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
+        do {
+            try BGTaskScheduler.shared.submit(refreshRequest)
+        } catch {
+            // Error code 1 is BGTaskSchedulerError.Code.tooManyPendingTaskRequests - safe to ignore
+        }
 
         // Schedule background processing for deeper sync and prefetching
         let processingRequest = BGProcessingTaskRequest(identifier: processingIdentifier)
-        processingRequest.earliestBeginDate = Date(timeIntervalSinceNow: 30 * 60)
+        processingRequest.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
         processingRequest.requiresNetworkConnectivity = true
         processingRequest.requiresExternalPower = false
-        try? BGTaskScheduler.shared.submit(processingRequest)
+        do {
+            try BGTaskScheduler.shared.submit(processingRequest)
+        } catch {
+            // Non-fatal if already pending
+        }
     }
 
     private static func run(_ task: BGTask, store: MailStore) async {
@@ -42,12 +50,15 @@ enum BackgroundRefresh {
         schedule()
 
         let work = Task { @MainActor in
+            if !store.cacheRestored {
+                await store.restoreCache()
+            }
             if task is BGAppRefreshTask {
-                // Lean 1-2s check: INBOX only, no heavy folders or AI, announces immediately
+                // Lean 1-2s check: INBOX only, announces immediately
                 _ = await store.backgroundQuickSync()
             } else {
-                // Deeper processing task (allowed more runtime)
-                await store.refresh()
+                // Deeper processing task: syncs accounts and announces new unread mail
+                _ = await store.backgroundDeepSync()
             }
         }
 

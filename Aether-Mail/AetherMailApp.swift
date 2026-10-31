@@ -1,10 +1,41 @@
 import SwiftUI
+import UIKit
+import BackgroundTasks
+
+/// Application delegate to support iOS background fetch intervals and legacy fetch wakes
+/// alongside BGTaskScheduler.
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil
+    ) -> Bool {
+        // Enable iOS opportunistic background fetch with the system minimum interval
+        application.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
+        return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        guard let store = MailStore.current else {
+            completionHandler(.noData)
+            return
+        }
+        Task { @MainActor in
+            let count = await store.backgroundQuickSync()
+            BackgroundRefresh.schedule()
+            completionHandler(count > 0 ? .newData : .noData)
+        }
+    }
+}
 
 /// Aether Mail — the iOS/iPadOS email client. Shell over the shared EmailKit
 /// engine (same one the macOS Aether-Courier uses). AI routing (on-device → Mac
 /// → cloud) layers in later.
 @main
 struct AetherMailApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var store = MailStore()
     @Environment(\.scenePhase) private var scenePhase
     @State private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
@@ -55,12 +86,13 @@ struct AetherMailApp: App {
 
                         // Request an execution grace period from iOS (~30 seconds)
                         // so ongoing syncs finish and incoming mail can be notified immediately
-                        let taskID = UIApplication.shared.beginBackgroundTask(withName: "com.aether.mail.backgroundGrace") {
+                        var taskID: UIBackgroundTaskIdentifier = .invalid
+                        taskID = UIApplication.shared.beginBackgroundTask(withName: "com.aether.mail.backgroundGrace") {
                             // Expiration handler: iOS is revoking time
                             store.stopAllIdle()
-                            if backgroundTaskID != .invalid {
-                                UIApplication.shared.endBackgroundTask(backgroundTaskID)
-                                backgroundTaskID = .invalid
+                            if taskID != .invalid {
+                                UIApplication.shared.endBackgroundTask(taskID)
+                                taskID = .invalid
                             }
                         }
                         backgroundTaskID = taskID
@@ -68,10 +100,10 @@ struct AetherMailApp: App {
                         // Keep IDLE alive during the grace period (up to 25s), then cleanly disconnect
                         Task {
                             try? await Task.sleep(for: .seconds(25))
-                            if backgroundTaskID != .invalid {
+                            if taskID != .invalid {
                                 store.stopAllIdle()
-                                UIApplication.shared.endBackgroundTask(backgroundTaskID)
-                                backgroundTaskID = .invalid
+                                UIApplication.shared.endBackgroundTask(taskID)
+                                taskID = .invalid
                             }
                         }
                     default:
