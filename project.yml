@@ -64,6 +64,9 @@ targets:
         BGTaskSchedulerPermittedIdentifiers:
           - com.aether.mail.refresh
           - com.aether.mail.processing
+        LSApplicationQueriesSchemes:
+          - googlechrome
+          - googlechromes
         UILaunchScreen:
           UIColorName: ""
         UISupportedInterfaceOrientations:

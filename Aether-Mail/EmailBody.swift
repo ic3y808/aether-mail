@@ -175,16 +175,34 @@ private struct EmailHTMLView: UIViewRepresentable {
             }
         }
 
-        /// Open external links (http, https, mailto, tel) in the OS default browser/app.
+        /// Open external links (http, https, mailto, tel) in Google Chrome if installed, or system default.
         private func handleExternalLink(url: URL) -> Bool {
             let scheme = url.scheme?.lowercased() ?? ""
             guard !scheme.isEmpty, !Self.internalSchemes.contains(scheme) else {
                 return false
             }
             DispatchQueue.main.async {
+                // If it's a web URL (http or https), prioritize Google Chrome if installed
+                if scheme == "http" || scheme == "https" {
+                    if let chromeURL = Self.chromeURL(from: url), UIApplication.shared.canOpenURL(chromeURL) {
+                        UIApplication.shared.open(chromeURL, options: [:], completionHandler: nil)
+                        return
+                    }
+                }
+
+                // Default system handling (Safari / default browser, or mailto / tel)
                 UIApplication.shared.open(url, options: [:], completionHandler: nil)
             }
             return true
+        }
+
+        private static func chromeURL(from url: URL) -> URL? {
+            guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+                return nil
+            }
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: true)
+            components?.scheme = (scheme == "https") ? "googlechromes" : "googlechrome"
+            return components?.url
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
