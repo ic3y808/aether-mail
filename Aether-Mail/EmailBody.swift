@@ -45,54 +45,129 @@ private struct EmailHTMLView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> WKWebView {
-        let web = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let config = WKWebViewConfiguration()
+        let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
+        web.uiDelegate = context.coordinator
         web.scrollView.isScrollEnabled = false          // the SwiftUI ScrollView scrolls
         web.scrollView.bounces = false
         web.isOpaque = false
         web.backgroundColor = .white
+        web.allowsLinkPreview = false
         return web
     }
 
     func updateUIView(_ web: WKWebView, context: Context) {
+        if web.navigationDelegate == nil { web.navigationDelegate = context.coordinator }
+        if web.uiDelegate == nil { web.uiDelegate = context.coordinator }
+
         let doc = Self.wrap(html)
         guard context.coordinator.lastHTML != doc else { return }
         context.coordinator.lastHTML = doc
         web.loadHTMLString(doc, baseURL: nil)
     }
 
-    /// Wrap the raw HTML with a responsive viewport + light base styling so wide
-    /// emails don't overflow and text stays legible.
+    /// Wrap the raw HTML with a responsive viewport + base styling so wide
+    /// emails don't overflow, word wraps nicely, and text stays legible.
     static func wrap(_ html: String) -> String {
         """
         <!doctype html><html><head>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
         <style>
           :root { color-scheme: light; }
-          html, body { margin:0; padding:0; background:#fff; color:#111;
-            font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;
-            font-size:16px; line-height:1.45; -webkit-text-size-adjust:100%; }
-          body { padding:16px; word-wrap:break-word; overflow-wrap:break-word; }
-          img { max-width:100% !important; height:auto !important; }
-          table { max-width:100% !important; }
-          a { color:#6a4cf0; }
+          * { box-sizing: border-box; }
+          html, body {
+            margin: 0;
+            padding: 0;
+            background: #ffffff;
+            color: #111111;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.45;
+            -webkit-text-size-adjust: 100%;
+          }
+          body {
+            padding: 12px;
+            word-wrap: break-word;
+            overflow-wrap: anywhere;
+          }
+          img {
+            max-width: 100% !important;
+            height: auto !important;
+          }
+          table {
+            max-width: 100% !important;
+          }
+          td, th {
+            max-width: 100% !important;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+          }
+          pre, code {
+            white-space: pre-wrap !important;
+            overflow-wrap: anywhere;
+          }
+          a {
+            color: #6a4cf0;
+            overflow-wrap: anywhere;
+          }
         </style></head><body>\(html)</body></html>
         """
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         let parent: EmailHTMLView
         var lastHTML: String?
+        private var pendingWebViews: [WKWebView] = []
+
+        private static let internalSchemes: Set<String> = ["about", "applewebdata", "data", "blob"]
+
         init(_ parent: EmailHTMLView) { self.parent = parent }
 
         func webView(_ web: WKWebView, didFinish nav: WKNavigation!) {
             measure(web)
-            // Re-measure once more after remote images have had a chance to load.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.measure(web) }
+            // Re-measure after remote images have had a chance to load and lay out.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self, weak web] in
+                guard let web else { return }
+                self?.measure(web)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self, weak web] in
+                guard let web else { return }
+                self?.measure(web)
+            }
         }
 
         private func measure(_ web: WKWebView) {
-            web.evaluateJavaScript("document.body.scrollHeight") { value, _ in
+            // Auto-scale content if wide tables or images exceed viewport width,
+            // then report the actual rendered height back to SwiftUI.
+            let script = """
+            (function() {
+                document.body.style.zoom = '1';
+                var viewWidth = window.innerWidth || document.documentElement.clientWidth;
+                if (!viewWidth || viewWidth <= 0) {
+                    viewWidth = document.body.clientWidth;
+                }
+                var contentWidth = Math.max(
+                    document.body.scrollWidth,
+                    document.documentElement.scrollWidth,
+                    document.body.offsetWidth,
+                    document.documentElement.offsetWidth
+                );
+                var scale = 1.0;
+                if (viewWidth > 0 && contentWidth > viewWidth + 1) {
+                    scale = viewWidth / contentWidth;
+                    document.body.style.zoom = scale;
+                }
+                return Math.max(
+                    document.body.scrollHeight,
+                    document.documentElement.scrollHeight,
+                    document.body.offsetHeight,
+                    document.documentElement.offsetHeight
+                );
+            })()
+            """
+            web.evaluateJavaScript(script) { [weak self] value, _ in
+                guard let self else { return }
                 let h = (value as? CGFloat) ?? CGFloat((value as? Double) ?? 0)
                 if h > 0 {
                     DispatchQueue.main.async { self.parent.height = max(h, 60) }
@@ -100,10 +175,49 @@ private struct EmailHTMLView: UIViewRepresentable {
             }
         }
 
-        // Don't navigate away inside the reader when a link is tapped.
+        /// Open external links (http, https, mailto, tel) in the OS default browser/app.
+        private func handleExternalLink(url: URL) -> Bool {
+            let scheme = url.scheme?.lowercased() ?? ""
+            guard !scheme.isEmpty, !Self.internalSchemes.contains(scheme) else {
+                return false
+            }
+            DispatchQueue.main.async {
+                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            }
+            return true
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     preferences: WKWebpagePreferences,
+                     decisionHandler: @escaping (WKNavigationActionPolicy, WKWebpagePreferences) -> Void) {
+            if let url = navigationAction.request.url, handleExternalLink(url: url) {
+                pendingWebViews.removeAll { $0 == webView }
+                decisionHandler(.cancel, preferences)
+                return
+            }
+            decisionHandler(.allow, preferences)
+        }
+
         func webView(_ web: WKWebView, decidePolicyFor action: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            decisionHandler(action.navigationType == .linkActivated ? .cancel : .allow)
+            if let url = action.request.url, handleExternalLink(url: url) {
+                pendingWebViews.removeAll { $0 == web }
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            if let url = navigationAction.request.url, handleExternalLink(url: url) {
+                return nil
+            }
+            let temp = WKWebView(frame: .zero, configuration: configuration)
+            temp.navigationDelegate = self
+            temp.uiDelegate = self
+            pendingWebViews.append(temp)
+            return temp
         }
     }
 }
