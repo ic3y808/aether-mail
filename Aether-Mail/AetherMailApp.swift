@@ -18,7 +18,40 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // Enable iOS opportunistic background fetch with the system minimum interval
         application.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
 
+        // Register for Apple Remote Push Notifications (APNs)
+        application.registerForRemoteNotifications()
+
         return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+    ) {
+        let token = deviceToken.map { String(format: "%02.2hhx", $0) }.joined()
+        UserDefaults.standard.set(token, forKey: "AetherMail.apnsDeviceToken")
+        Task { @MainActor in
+            await MailNotifier.shared.registerAPNSToken(token)
+        }
+    }
+
+    func application(
+        _ application: UIApplication,
+        didFailToRegisterForRemoteNotificationsWithError error: Error
+    ) {
+        UserDefaults.standard.set("Failed: \(error.localizedDescription)", forKey: "AetherMail.apnsError")
+    }
+
+    func application(
+        _ application: UIApplication,
+        didReceiveRemoteNotification userInfo: [AnyHashable : Any],
+        fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        Task { @MainActor in
+            let count = await MailStore.shared.backgroundQuickSync()
+            BackgroundRefresh.recordCheck(summary: "Push wake: \(count) announced")
+            completionHandler(count > 0 ? .newData : .noData)
+        }
     }
 
     func application(

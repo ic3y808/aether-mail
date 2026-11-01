@@ -644,6 +644,14 @@ struct BackgroundDiagnosticsView: View {
             }
             .font(.caption)
 
+            HStack {
+                Text("APNs Push Token")
+                Spacer()
+                Text(MailNotifier.shared.apnsToken != nil ? "Registered" : (UserDefaults.standard.string(forKey: "AetherMail.apnsError") ?? "Registering…"))
+                    .foregroundStyle(MailNotifier.shared.apnsToken != nil ? .green : .secondary)
+            }
+            .font(.caption)
+
             if let last = BackgroundRefresh.lastCheckDate {
                 HStack {
                     Text("Last Background Check")

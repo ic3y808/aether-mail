@@ -61,6 +61,7 @@ targets:
         UIBackgroundModes:
           - fetch
           - processing
+          - remote-notification
         BGTaskSchedulerPermittedIdentifiers:
           - com.aether.mail.refresh
           - com.aether.mail.processing
@@ -80,7 +81,8 @@ targets:
           - UIInterfaceOrientationLandscapeRight
     entitlements:
       path: Aether-Mail/Aether-Mail.entitlements
-      properties: {}
+      properties:
+        aps-environment: development
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aether.mail
@@ -91,7 +93,9 @@ targets:
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         DEVELOPMENT_TEAM: RH5VT77Z5T
-        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Apple Development"
+        PROVISIONING_PROFILE_SPECIFIER: "Aether Mail Development"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 
   # Apple Watch companion — a glanceable inbox mirror. Read-only: the iPhone

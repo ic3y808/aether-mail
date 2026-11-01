@@ -199,5 +199,18 @@ final class MailNotifier: NSObject, UNUserNotificationCenterDelegate {
         @unknown default: return "Unknown"
         }
     }
+
+    /// Stores the remote APNs device token and persists it to disk for the bridge.
+    func registerAPNSToken(_ token: String) async {
+        UserDefaults.standard.set(token, forKey: "AetherMail.apnsDeviceToken")
+        if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let url = docs.appendingPathComponent("apns_token.txt")
+            try? token.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    var apnsToken: String? {
+        UserDefaults.standard.string(forKey: "AetherMail.apnsDeviceToken")
+    }
 }
 
