@@ -395,26 +395,32 @@ struct ReadingView: View {
         self._currentMessage = State(initialValue: message)
     }
 
-    private var allMessages: [MailMessage] {
-        store.inbox
+    private var currentMailboxMessages: [MailMessage] {
+        if currentMessage.folderPath.isEmpty || currentMessage.folderPath == "INBOX" {
+            return store.inbox
+        }
+        let list = store.messages(currentMessage.accountID, currentMessage.folderPath)
+        return list.isEmpty ? store.inbox : list
     }
 
     private var unreadCountRemaining: Int {
-        allMessages.filter { store.isUnread($0) && $0.id != currentMessage.id }.count
-    }
-
-    private var previousUnread: MailMessage? {
-        guard let idx = allMessages.firstIndex(where: { $0.id == currentMessage.id }), idx > 0 else {
-            return nil
-        }
-        return allMessages[0..<idx].last(where: { store.isUnread($0) && $0.id != currentMessage.id })
+        currentMailboxMessages.filter { store.isUnread($0) && $0.id != currentMessage.id }.count
     }
 
     private var nextUnread: MailMessage? {
-        guard let idx = allMessages.firstIndex(where: { $0.id == currentMessage.id }), idx + 1 < allMessages.count else {
-            return nil
+        let all = currentMailboxMessages
+        guard let idx = all.firstIndex(where: { $0.id == currentMessage.id }) else {
+            return all.first(where: { store.isUnread($0) && $0.id != currentMessage.id })
         }
-        return allMessages[(idx + 1)...].first(where: { store.isUnread($0) && $0.id != currentMessage.id })
+        // Top to bottom: first look forward from current message downwards
+        if idx + 1 < all.count, let below = all[(idx + 1)...].first(where: { store.isUnread($0) && $0.id != currentMessage.id }) {
+            return below
+        }
+        // If reached bottom, loop back from the top of the box
+        if idx > 0, let above = all[0..<idx].first(where: { store.isUnread($0) && $0.id != currentMessage.id }) {
+            return above
+        }
+        return nil
     }
 
     private func navigateTo(_ target: MailMessage) {
@@ -428,7 +434,7 @@ struct ReadingView: View {
     }
 
     private func archiveCurrent() {
-        let next = nextUnread ?? previousUnread
+        let next = nextUnread
         store.archive([currentMessage])
         if let next {
             navigateTo(next)
@@ -438,7 +444,7 @@ struct ReadingView: View {
     }
 
     private func deleteCurrent() {
-        let next = nextUnread ?? previousUnread
+        let next = nextUnread
         store.requestDelete([currentMessage])
         if let next {
             navigateTo(next)
@@ -464,22 +470,22 @@ struct ReadingView: View {
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                HStack(spacing: 2) {
+                if let next = nextUnread {
                     Button {
-                        if let prev = previousUnread { navigateTo(prev) }
+                        navigateTo(next)
                     } label: {
-                        Image(systemName: "chevron.up")
+                        HStack(spacing: 3) {
+                            Text("Next")
+                                .font(.caption.weight(.bold))
+                            Image(systemName: "chevron.down")
+                                .font(.caption.weight(.bold))
+                        }
+                        .padding(.horizontal, 9).padding(.vertical, 4)
+                        .background(Capsule().fill(LinearGradient.aether))
+                        .foregroundStyle(.white)
                     }
-                    .disabled(previousUnread == nil)
-
-                    Button {
-                        if let next = nextUnread { navigateTo(next) }
-                    } label: {
-                        Image(systemName: "chevron.down")
-                    }
-                    .disabled(nextUnread == nil)
+                    .buttonStyle(.plain)
                 }
-                .padding(.trailing, 2)
 
                 Button {
                     store.toggleFlagged(currentMessage)
@@ -499,44 +505,36 @@ struct ReadingView: View {
             }
 
             ToolbarItemGroup(placement: .bottomBar) {
-                HStack(spacing: 12) {
+                if let next = nextUnread {
                     Button {
-                        if let prev = previousUnread { navigateTo(prev) }
+                        navigateTo(next)
                     } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "chevron.up")
-                            Text("Prev")
-                                .font(.caption.weight(.semibold))
+                        HStack(spacing: 6) {
+                            Text("Next Unread")
+                                .font(.subheadline.weight(.bold))
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.body)
+                            if unreadCountRemaining > 0 {
+                                Text("\(unreadCountRemaining)")
+                                    .font(.caption2.weight(.bold).monospacedDigit())
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(Capsule().fill(.white.opacity(0.25)))
+                            }
                         }
+                        .padding(.horizontal, 14).padding(.vertical, 7)
+                        .background(Capsule().fill(LinearGradient.aether))
+                        .foregroundStyle(.white)
+                        .shadow(color: Color.aetherMagenta.opacity(0.3), radius: 6, y: 2)
                     }
-                    .disabled(previousUnread == nil)
-
-                    Button {
-                        if let next = nextUnread { navigateTo(next) }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text("Next")
-                                .font(.caption.weight(.semibold))
-                            Image(systemName: "chevron.down")
-                        }
-                    }
-                    .disabled(nextUnread == nil)
-                }
-
-                Spacer()
-
-                if unreadCountRemaining > 0 {
-                    HStack(spacing: 4) {
-                        Circle().fill(Color.aetherMagenta)
-                            .frame(width: 6, height: 6)
-                        Text("\(unreadCountRemaining) unread")
-                            .font(.caption2.weight(.medium))
+                    .buttonStyle(.plain)
+                } else {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("All Caught Up")
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
-                } else {
-                    Text("No more unread")
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(.secondary)
                 }
 
                 Spacer()
