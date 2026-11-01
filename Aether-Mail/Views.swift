@@ -385,9 +385,67 @@ struct ReadingView: View {
     @Environment(MailStore.self) private var store
     let message: MailMessage
     @Environment(\.dismiss) private var dismiss
+    @State private var currentMessage: MailMessage
     @State private var question = ""
     @State private var answer: String?
     @State private var asking = false
+
+    init(message: MailMessage) {
+        self.message = message
+        self._currentMessage = State(initialValue: message)
+    }
+
+    private var allMessages: [MailMessage] {
+        store.inbox
+    }
+
+    private var unreadCountRemaining: Int {
+        allMessages.filter { store.isUnread($0) && $0.id != currentMessage.id }.count
+    }
+
+    private var previousUnread: MailMessage? {
+        guard let idx = allMessages.firstIndex(where: { $0.id == currentMessage.id }), idx > 0 else {
+            return nil
+        }
+        return allMessages[0..<idx].last(where: { store.isUnread($0) && $0.id != currentMessage.id })
+    }
+
+    private var nextUnread: MailMessage? {
+        guard let idx = allMessages.firstIndex(where: { $0.id == currentMessage.id }), idx + 1 < allMessages.count else {
+            return nil
+        }
+        return allMessages[(idx + 1)...].first(where: { store.isUnread($0) && $0.id != currentMessage.id })
+    }
+
+    private func navigateTo(_ target: MailMessage) {
+        withAnimation(.snappy) {
+            currentMessage = target
+            question = ""
+            answer = nil
+            asking = false
+        }
+        store.open(target)
+    }
+
+    private func archiveCurrent() {
+        let next = nextUnread ?? previousUnread
+        store.archive([currentMessage])
+        if let next {
+            navigateTo(next)
+        } else {
+            dismiss()
+        }
+    }
+
+    private func deleteCurrent() {
+        let next = nextUnread ?? previousUnread
+        store.requestDelete([currentMessage])
+        if let next {
+            navigateTo(next)
+        } else {
+            dismiss()
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -400,49 +458,116 @@ struct ReadingView: View {
             }
             .padding()
         }
+        .id(currentMessage.id)
         .background { AuroraBackdrop(intensity: 0.7) }
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button {
-                    store.toggleFlagged(message)
-                } label: {
-                    Image(systemName: message.flags.contains(.flagged) ? "flag.fill" : "flag")
+                HStack(spacing: 2) {
+                    Button {
+                        if let prev = previousUnread { navigateTo(prev) }
+                    } label: {
+                        Image(systemName: "chevron.up")
+                    }
+                    .disabled(previousUnread == nil)
+
+                    Button {
+                        if let next = nextUnread { navigateTo(next) }
+                    } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .disabled(nextUnread == nil)
                 }
-                Button { store.archive([message]) } label: { Image(systemName: "archivebox") }
-                Button(role: .destructive) {
-                    store.requestDelete([message])
-                    dismiss()
+                .padding(.trailing, 2)
+
+                Button {
+                    store.toggleFlagged(currentMessage)
                 } label: {
-                    Image(systemName: store.deleteIntent(for: [message]) == .permanent
+                    Image(systemName: currentMessage.flags.contains(.flagged) ? "flag.fill" : "flag")
+                }
+                Button { archiveCurrent() } label: { Image(systemName: "archivebox") }
+                Button(role: .destructive) {
+                    deleteCurrent()
+                } label: {
+                    Image(systemName: store.deleteIntent(for: [currentMessage]) == .permanent
                           ? "trash.slash" : "trash")
                 }
                 Menu {
-                    MessageMenu(message: message, store: store)
+                    MessageMenu(message: currentMessage, store: store)
                 } label: { Image(systemName: "ellipsis.circle") }
             }
+
+            ToolbarItemGroup(placement: .bottomBar) {
+                HStack(spacing: 12) {
+                    Button {
+                        if let prev = previousUnread { navigateTo(prev) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.up")
+                            Text("Prev")
+                                .font(.caption.weight(.semibold))
+                        }
+                    }
+                    .disabled(previousUnread == nil)
+
+                    Button {
+                        if let next = nextUnread { navigateTo(next) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Next")
+                                .font(.caption.weight(.semibold))
+                            Image(systemName: "chevron.down")
+                        }
+                    }
+                    .disabled(nextUnread == nil)
+                }
+
+                Spacer()
+
+                if unreadCountRemaining > 0 {
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.aetherMagenta)
+                            .frame(width: 6, height: 6)
+                        Text("\(unreadCountRemaining) unread")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("No more unread")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button {
+                    store.setRead(currentMessage, !store.isUnread(currentMessage))
+                } label: {
+                    Image(systemName: store.isUnread(currentMessage) ? "envelope.open" : "envelope.badge")
+                }
+            }
         }
-        .onAppear { store.open(message) }
+        .onAppear { store.open(currentMessage) }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(message.subject.isEmpty ? "(no subject)" : message.subject).font(.title3).bold()
+            Text(currentMessage.subject.isEmpty ? "(no subject)" : currentMessage.subject).font(.title3).bold()
             HStack(spacing: 12) {
                 ZStack {
                     Circle().fill(LinearGradient.aether.opacity(0.9))
-                    Text(String((message.from.first?.shortLabel ?? "?").prefix(1)).uppercased())
+                    Text(String((currentMessage.from.first?.shortLabel ?? "?").prefix(1)).uppercased())
                         .font(.headline).foregroundStyle(.white)
                 }.frame(width: 40, height: 40)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(message.from.first?.shortLabel ?? "Unknown").fontWeight(.medium)
-                    if let a = message.from.first?.address {
+                    Text(currentMessage.from.first?.shortLabel ?? "Unknown").fontWeight(.medium)
+                    if let a = currentMessage.from.first?.address {
                         Text(a).font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 Spacer()
-                if let d = message.date {
+                if let d = currentMessage.date {
                     Text(d.formatted(date: .abbreviated, time: .shortened))
                         .font(.caption2).foregroundStyle(.secondary)
                 }
@@ -456,9 +581,9 @@ struct ReadingView: View {
             GlowOrb(systemImage: "sparkles", size: 34)
             VStack(alignment: .leading, spacing: 3) {
                 Text("Summary").font(.caption2).foregroundStyle(.secondary).kerning(1.2)
-                if let s = store.summary(for: message.id) {
+                if let s = store.summary(for: currentMessage.id) {
                     Text(s).font(.callout)
-                } else if store.bodyErrors[message.id] != nil {
+                } else if store.bodyErrors[currentMessage.id] != nil {
                     Text("No summary — the message didn't load.")
                         .font(.callout).foregroundStyle(.secondary)
                 } else {
@@ -477,9 +602,9 @@ struct ReadingView: View {
 
     private var bodyCard: some View {
         Group {
-            if let body = store.body(for: message) {
+            if let body = store.body(for: currentMessage) {
                 EmailBodyView(content: body)
-            } else if let reason = store.bodyErrors[message.id] {
+            } else if let reason = store.bodyErrors[currentMessage.id] {
                 // A failure is shown in the app's own chrome with a way out. It
                 // used to be written into the body itself, which rendered it on
                 // the white "paper" card as though the sender had written it -
@@ -489,7 +614,7 @@ struct ReadingView: View {
                         .font(.callout.weight(.semibold))
                     Text(reason).font(.footnote).foregroundStyle(.secondary)
                     Button {
-                        store.retryBody(message)
+                        store.retryBody(currentMessage)
                     } label: {
                         Label("Try Again", systemImage: "arrow.clockwise")
                             .font(.footnote.weight(.semibold))
@@ -541,7 +666,7 @@ struct ReadingView: View {
         let q = question
         question = ""; asking = true; answer = nil
         Task {
-            answer = await store.ask(q, about: message) ?? "On-device AI isn't available right now."
+            answer = await store.ask(q, about: currentMessage) ?? "On-device AI isn't available right now."
             asking = false
         }
     }
