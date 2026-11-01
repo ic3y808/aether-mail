@@ -12,11 +12,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // MUST register BGTaskScheduler launch handlers synchronously BEFORE didFinishLaunching returns!
         BackgroundRefresh.register(store: MailStore.shared)
 
+        // Set UNUserNotificationCenter delegate synchronously during launch so foreground notifications work!
+        UNUserNotificationCenter.current().delegate = MailNotifier.shared
+
         // Enable iOS opportunistic background fetch with the system minimum interval
         application.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
-
-        // Schedule upcoming background refresh tasks with iOS
-        BackgroundRefresh.schedule()
 
         return true
     }
@@ -57,6 +57,8 @@ struct AetherMailApp: App {
                     await MailNotifier.shared.requestAuthorization()
                     // Schedule background checks with iOS right away
                     BackgroundRefresh.schedule()
+                    // Synchronize the application icon badge with current unread count
+                    store.updateIconBadge()
                     // A fresh install must not fire a banner for every message
                     // already sitting in the inbox - the first sync is the
                     // baseline, not news.
@@ -76,10 +78,12 @@ struct AetherMailApp: App {
                         Task {
                             await store.refresh()
                             store.startAllIdle()
+                            store.updateIconBadge()
                         }
                     case .background:
                         // Schedule periodic background refresh with iOS
                         BackgroundRefresh.schedule()
+                        store.updateIconBadge()
 
                         // Request an execution grace period from iOS (~30 seconds)
                         // so ongoing syncs finish and incoming mail can be notified immediately
@@ -94,9 +98,12 @@ struct AetherMailApp: App {
                         }
                         backgroundTaskID = taskID
 
-                        // Keep IDLE alive during the grace period (up to 25s), then cleanly disconnect
+                        // Keep IDLE alive during background grace period until iOS revokes time
                         Task {
-                            try? await Task.sleep(for: .seconds(25))
+                            while UIApplication.shared.backgroundTimeRemaining > 4 {
+                                try? await Task.sleep(for: .seconds(2))
+                                if backgroundTaskID == .invalid { break }
+                            }
                             if taskID != .invalid {
                                 store.stopAllIdle()
                                 UIApplication.shared.endBackgroundTask(taskID)

@@ -26,6 +26,7 @@ extension MailStore {
             messagesByFolder[key] = cache.messages
         }
         cacheRestored = true
+        updateIconBadge()
         WatchBridge.shared.sync(from: self)
     }
 

@@ -370,7 +370,10 @@ extension MailStore {
 
     /// Applies `transform` wherever this message is currently held.
     func mutateLocal(_ m: MailMessage, _ transform: (inout MailMessage) -> Void) {
-        defer { saveMessageCache() }
+        defer {
+            saveMessageCache()
+            updateIconBadge()
+        }
         if let idx = messagesByAccount[m.accountID]?.firstIndex(where: { $0.id == m.id }) {
             transform(&messagesByAccount[m.accountID]![idx])
         }
@@ -381,14 +384,20 @@ extension MailStore {
     }
 
     func removeLocal(_ m: MailMessage) {
-        defer { saveMessageCache() }
+        defer {
+            saveMessageCache()
+            updateIconBadge()
+        }
         messagesByAccount[m.accountID]?.removeAll { $0.id == m.id }
         messagesByFolder[folderKey(m.accountID, m.folderPath)]?.removeAll { $0.id == m.id }
         openBodies[m.id] = nil
     }
 
     func insertLocal(_ messages: [MailMessage]) {
-        defer { saveMessageCache() }
+        defer {
+            saveMessageCache()
+            updateIconBadge()
+        }
         for m in messages {
             if m.folderPath == "INBOX" {
                 var list = messagesByAccount[m.accountID] ?? []

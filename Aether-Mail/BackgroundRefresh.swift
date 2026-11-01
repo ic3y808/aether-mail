@@ -31,9 +31,9 @@ enum BackgroundRefresh {
     static func schedule() {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: lastScheduleKey)
 
-        // Schedule opportunistic app refresh (every 5-15 minutes)
+        // Schedule opportunistic app refresh (as early as 1 minute)
         let refreshRequest = BGAppRefreshTaskRequest(identifier: refreshIdentifier)
-        refreshRequest.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
+        refreshRequest.earliestBeginDate = Date(timeIntervalSinceNow: 60)
         do {
             try BGTaskScheduler.shared.submit(refreshRequest)
         } catch {
@@ -42,7 +42,7 @@ enum BackgroundRefresh {
 
         // Schedule background processing for deeper sync and prefetching
         let processingRequest = BGProcessingTaskRequest(identifier: processingIdentifier)
-        processingRequest.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+        processingRequest.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
         processingRequest.requiresNetworkConnectivity = true
         processingRequest.requiresExternalPower = false
         do {

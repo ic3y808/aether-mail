@@ -703,11 +703,18 @@ final class MailStore {
             }
             WatchBridge.shared.sync(from: self)   // mirror the fresh inbox to the watch
             startAllIdle()                        // start live IMAP push for enabled accounts
-            // Keeps the app badge honest and, more importantly, records what has
-            // been seen in the foreground so it is never announced by a later background wake.
             if !demoMode {
-                MailNotifier.shared.suppress(inbox)
-                await MailNotifier.shared.updateBadge(unreadCount)
+                if !MailNotifier.shared.hasAnnouncedAnything {
+                    MailNotifier.shared.suppress(inbox)
+                } else {
+                    await MailNotifier.shared.announce(
+                        inbox,
+                        unreadTotal: unreadCount,
+                        blockedAddresses: blockedSenders,
+                        blockedChecker: { [weak self] m in self?.isBlocked(m) ?? false }
+                    )
+                }
+                updateIconBadge()
             }
             prefetchInbox()                        // warm bodies + AI summaries in the background
             backfillSummaries()                    // ...then everything else that still lacks one
@@ -762,6 +769,7 @@ final class MailStore {
             blockedAddresses: blockedSenders,
             blockedChecker: { [weak self] m in self?.isBlocked(m) ?? false }
         )
+        updateIconBadge()
         WatchBridge.shared.sync(from: self)
         return announced
     }
@@ -784,9 +792,18 @@ final class MailStore {
             blockedAddresses: blockedSenders,
             blockedChecker: { [weak self] m in self?.isBlocked(m) ?? false }
         )
+        updateIconBadge()
         prefetchInbox()
         WatchBridge.shared.sync(from: self)
         return announced
+    }
+
+    /// Synchronizes the application icon badge count with current unread inbox mail.
+    func updateIconBadge() {
+        let count = unreadCount
+        Task { @MainActor in
+            await MailNotifier.shared.updateBadge(count)
+        }
     }
 
     /// Convenience for callers in synchronous contexts.
@@ -824,6 +841,7 @@ final class MailStore {
                                 if !self.demoMode {
                                     await MailNotifier.shared.announce(self.inbox, unreadTotal: self.unreadCount, blockedAddresses: self.blockedSenders)
                                 }
+                                self.updateIconBadge()
                                 self.prefetchInbox()
                             }
                         default:
@@ -907,6 +925,7 @@ final class MailStore {
         readIDs.insert(m.id)                                // local mark-read
         saveMessageCache()                                  // ...and remember it across launches
         WatchBridge.shared.sync(from: self)                 // unread count changed
+        updateIconBadge()
         Task {
             await loadBody(m)
             await summarizeIfNeeded(m)                       // on-device AI summary

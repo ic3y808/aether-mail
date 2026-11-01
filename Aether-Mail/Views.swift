@@ -99,6 +99,7 @@ struct InboxView: View {
     @Environment(MailStore.self) private var store
     /// Persisted: a filter that resets every launch is a filter you stop using.
     @AppStorage("inbox.showUnreadOnly") private var unreadOnly = false
+    @State private var notificationsDenied = false
 
     private var visible: [MailMessage] {
         unreadOnly ? store.inbox.filter { store.isUnread($0) } : store.inbox
@@ -107,6 +108,31 @@ struct InboxView: View {
     var body: some View {
         List {
             filterBar
+            if notificationsDenied {
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "bell.slash.fill").foregroundStyle(.yellow)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Notifications are turned off").font(.caption.weight(.semibold))
+                            Text("Tap here to allow notifications in iOS Settings so new email alerts work.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
+                    }
+                    .padding(10)
+                    .background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.yellow.opacity(0.3)))
+                }
+                .buttonStyle(.plain)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 4, leading: 14, bottom: 4, trailing: 14))
+            }
             ForEach(store.accounts.filter { store.syncState[$0.id]?.errorText != nil }) { account in
                 SyncErrorRow(account: account)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
@@ -131,6 +157,10 @@ struct InboxView: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .refreshable { await store.refresh() }
+        .task {
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            notificationsDenied = (settings.authorizationStatus == .denied)
+        }
         .overlay {
             if visible.isEmpty && !store.isSyncing && !store.hasSyncErrors {
                 if unreadOnly && !store.inbox.isEmpty {

@@ -1,15 +1,15 @@
 import Foundation
+import UIKit
 import UserNotifications
 import EmailKit
 
 /// New-mail notifications.
 ///
-/// iOS cannot hold an IMAP IDLE connection open in the background, so this is
-/// not true push: the OS wakes the app when it feels like it (typically every
-/// 15-60 minutes, learned from usage), the app syncs, and anything genuinely new
-/// becomes a local notification. True push would need an APNs key plus a
-/// server-side watcher holding IDLE per account - a separate build, and this
-/// works with no infrastructure at all.
+/// iOS cannot hold an IMAP IDLE connection open indefinitely in the background,
+/// so the app uses a multi-layered approach: active IMAP IDLE while foregrounded
+/// and during background grace periods, plus BGAppRefreshTask and opportunistic
+/// background fetches when suspended. Any fresh unread message is announced via
+/// local notifications and synchronizes the application icon badge.
 @MainActor
 final class MailNotifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = MailNotifier()
@@ -41,11 +41,20 @@ final class MailNotifier: NSObject, UNUserNotificationCenterDelegate {
         completionHandler([.banner, .sound, .badge, .list])
     }
 
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        completionHandler()
+    }
+
     /// Asks once. A refusal is remembered by the system, so this is safe to call
     /// on every launch.
     func requestAuthorization() async {
-        _ = try? await UNUserNotificationCenter.current()
-            .requestAuthorization(options: [.alert, .sound, .badge])
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
     }
 
     var isAuthorized: Bool {
@@ -68,6 +77,9 @@ final class MailNotifier: NSObject, UNUserNotificationCenterDelegate {
         blockedAddresses: Set<String> = [],
         blockedChecker: ((MailMessage) -> Bool)? = nil
     ) async -> Int {
+        // ALWAYS update the application icon badge first, regardless of banner authorization!
+        await setBadge(unreadTotal)
+
         guard await isAuthorized else { return 0 }
 
         var seen = announced
@@ -148,13 +160,15 @@ final class MailNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     var hasAnnouncedAnything: Bool { !announced.isEmpty }
 
-    /// Sets the application icon badge count.
+    /// Sets the application icon badge count across UNUserNotificationCenter and UIKit.
     func updateBadge(_ count: Int) async {
         await setBadge(count)
     }
 
     private func setBadge(_ count: Int) async {
-        try? await UNUserNotificationCenter.current().setBadgeCount(max(0, count))
+        let clamped = max(0, count)
+        try? await UNUserNotificationCenter.current().setBadgeCount(clamped)
+        UIApplication.shared.applicationIconBadgeNumber = clamped
     }
 
     /// Sends an immediate test notification for user diagnostics.
