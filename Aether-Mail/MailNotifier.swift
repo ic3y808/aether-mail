@@ -156,4 +156,34 @@ final class MailNotifier: NSObject, UNUserNotificationCenterDelegate {
     private func setBadge(_ count: Int) async {
         try? await UNUserNotificationCenter.current().setBadgeCount(max(0, count))
     }
+
+    /// Sends an immediate test notification for user diagnostics.
+    func sendTestNotification() async throws {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
+            throw NSError(domain: "MailNotifier", code: 1, userInfo: [NSLocalizedDescriptionKey: "Notifications are disabled in iOS Settings."])
+        }
+        let content = UNMutableNotificationContent()
+        content.title = "Aether Mail"
+        content.body = "Notifications are working! Background refresh is active."
+        content.sound = .default
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+        let request = UNNotificationRequest(identifier: "test-\(UUID().uuidString)", content: content, trigger: trigger)
+        try await center.add(request)
+    }
+
+    /// Human-readable status for settings display.
+    func authorizationStatusDescription() async -> String {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized: return "Allowed"
+        case .provisional: return "Provisional"
+        case .denied: return "Disabled in iOS Settings"
+        case .notDetermined: return "Not Determined"
+        case .ephemeral: return "Ephemeral"
+        @unknown default: return "Unknown"
+        }
+    }
 }
+

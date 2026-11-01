@@ -9,8 +9,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil
     ) -> Bool {
+        // MUST register BGTaskScheduler launch handlers synchronously BEFORE didFinishLaunching returns!
+        BackgroundRefresh.register(store: MailStore.shared)
+
         // Enable iOS opportunistic background fetch with the system minimum interval
         application.setMinimumBackgroundFetchInterval(UIApplication.backgroundFetchIntervalMinimum)
+
+        // Schedule upcoming background refresh tasks with iOS
+        BackgroundRefresh.schedule()
+
         return true
     }
 
@@ -18,12 +25,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         performFetchWithCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
-        guard let store = MailStore.current else {
-            completionHandler(.noData)
-            return
-        }
         Task { @MainActor in
-            let count = await store.backgroundQuickSync()
+            let count = await MailStore.shared.backgroundQuickSync()
+            BackgroundRefresh.recordCheck(summary: "Background fetch: \(count) announced")
             BackgroundRefresh.schedule()
             completionHandler(count > 0 ? .newData : .noData)
         }
@@ -36,16 +40,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 @main
 struct AetherMailApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var store = MailStore()
+    @State private var store = MailStore.shared
     @Environment(\.scenePhase) private var scenePhase
     @State private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
-
-    init() {
-        // Must happen before launch finishes, so it cannot wait for .task.
-        // MailStore is created above, so it is safe to hand over here.
-        let store = _store.wrappedValue
-        BackgroundRefresh.register(store: store)
-    }
 
     var body: some Scene {
         WindowGroup {

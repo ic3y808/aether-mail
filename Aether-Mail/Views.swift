@@ -579,12 +579,113 @@ struct AccountsView: View {
                 }
                 .listRowBackground(Color.white.opacity(0.06))
             }
+            Section("Background & Notifications") {
+                BackgroundDiagnosticsView()
+            }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background { AuroraBackdrop(intensity: 0.6) }
         .navigationTitle("Accounts")
         .toolbar { EditButton() }
+    }
+}
+
+struct BackgroundDiagnosticsView: View {
+    @Environment(MailStore.self) private var store
+    @State private var notifStatus = "Checking…"
+    @State private var isRunning = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Notifications")
+                Spacer()
+                Text(notifStatus)
+                    .foregroundStyle(notifStatus == "Allowed" ? .green : .orange)
+            }
+            .font(.caption)
+
+            HStack {
+                Text("Background Refresh")
+                Spacer()
+                Text(BackgroundRefresh.backgroundRefreshStatusDescription)
+                    .foregroundStyle(BackgroundRefresh.backgroundRefreshStatusDescription == "Available" ? .green : .orange)
+            }
+            .font(.caption)
+
+            if let last = BackgroundRefresh.lastCheckDate {
+                HStack {
+                    Text("Last Background Check")
+                    Spacer()
+                    Text(last.formatted(date: .abbreviated, time: .shortened))
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+                Text(BackgroundRefresh.lastCheckStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(BackgroundRefresh.lastCheckStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if notifStatus.contains("Disabled") || BackgroundRefresh.backgroundRefreshStatusDescription.contains("Disabled") {
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                } label: {
+                    Label("Open iOS Settings to Enable", systemImage: "gear")
+                        .font(.caption)
+                        .foregroundStyle(.yellow)
+                }
+            }
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Button {
+                    Task {
+                        do {
+                            try await MailNotifier.shared.sendTestNotification()
+                            store.banner = "Test notification sent!"
+                        } catch {
+                            store.banner = error.localizedDescription
+                        }
+                    }
+                } label: {
+                    Label("Test Banner", systemImage: "bell")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    guard !isRunning else { return }
+                    isRunning = true
+                    Task {
+                        let count = await store.backgroundQuickSync()
+                        BackgroundRefresh.recordCheck(summary: "Manual test: \(count) announced")
+                        store.banner = "Checked! Found & announced \(count) new email(s)."
+                        isRunning = false
+                    }
+                } label: {
+                    if isRunning {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Label("Run Quick Sync", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.caption)
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(Color.white.opacity(0.06))
+        .task {
+            notifStatus = await MailNotifier.shared.authorizationStatusDescription()
+        }
     }
 }
 

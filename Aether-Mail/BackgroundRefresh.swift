@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import BackgroundTasks
 import EmailKit
 
@@ -11,7 +12,11 @@ enum BackgroundRefresh {
     static let refreshIdentifier = "com.aether.mail.refresh"
     static let processingIdentifier = "com.aether.mail.processing"
 
-    /// Registered before the app finishes launching, which the system requires.
+    private static let lastCheckKey = "BackgroundRefresh.lastCheck"
+    private static let lastStatusKey = "BackgroundRefresh.lastStatus"
+    private static let lastScheduleKey = "BackgroundRefresh.lastSchedule"
+
+    /// Registered synchronously before the app finishes launching in application:didFinishLaunchingWithOptions:
     static func register(store: MailStore) {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: refreshIdentifier, using: nil) { task in
             guard let task = task as? BGAppRefreshTask else { return }
@@ -24,6 +29,8 @@ enum BackgroundRefresh {
     }
 
     static func schedule() {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: lastScheduleKey)
+
         // Schedule opportunistic app refresh (every 5-15 minutes)
         let refreshRequest = BGAppRefreshTaskRequest(identifier: refreshIdentifier)
         refreshRequest.earliestBeginDate = Date(timeIntervalSinceNow: 5 * 60)
@@ -54,17 +61,47 @@ enum BackgroundRefresh {
                 await store.restoreCache()
             }
             if task is BGAppRefreshTask {
-                // Lean 1-2s check: INBOX only, announces immediately
-                _ = await store.backgroundQuickSync()
+                let announced = await store.backgroundQuickSync()
+                recordCheck(summary: "Quick check: \(announced) announced")
             } else {
-                // Deeper processing task: syncs accounts and announces new unread mail
-                _ = await store.backgroundDeepSync()
+                let announced = await store.backgroundDeepSync()
+                recordCheck(summary: "Deep sync: \(announced) announced")
             }
         }
 
         // The system kills the app if it overruns (~30s for refresh)
-        task.expirationHandler = { work.cancel() }
+        task.expirationHandler = {
+            work.cancel()
+            recordCheck(summary: "Expired by iOS")
+        }
         _ = await work.result
         task.setTaskCompleted(success: !work.isCancelled)
+    }
+
+    static func recordCheck(summary: String) {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: lastCheckKey)
+        UserDefaults.standard.set(summary, forKey: lastStatusKey)
+    }
+
+    static var lastCheckDate: Date? {
+        let ts = UserDefaults.standard.double(forKey: lastCheckKey)
+        return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
+    }
+
+    static var lastCheckStatus: String {
+        UserDefaults.standard.string(forKey: lastStatusKey) ?? "No background checks recorded yet"
+    }
+
+    static var backgroundRefreshStatusDescription: String {
+        switch UIApplication.shared.backgroundRefreshStatus {
+        case .available:
+            return "Available"
+        case .denied:
+            return "Disabled in iOS Settings"
+        case .restricted:
+            return "Restricted (MDM / Screen Time)"
+        @unknown default:
+            return "Unknown"
+        }
     }
 }

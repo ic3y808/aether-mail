@@ -243,10 +243,9 @@ final class MailStore {
     @ObservationIgnored private var pathMonitorQueue = DispatchQueue(label: "com.aether.mail.networkMonitor")
     @ObservationIgnored private var isNetworkSatisfied = true
 
-    static weak var current: MailStore?
+    static let shared = MailStore()
 
     init() {
-        Self.current = self
         load()
         WatchBridge.shared.activate()             // start the paired-watch link
         isAddingAccount = accounts.isEmpty        // onboarding when there are none
