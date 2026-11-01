@@ -110,7 +110,7 @@ struct MailLabView: View {
                 case .people:      PeopleView(items: scored)
                 case .priority:    PriorityFeed(items: scored)
                 case .deck:        TriageDeck(items: scored)
-                case .categories:  ShelvesView(items: scored)
+                case .categories:  LabShelvesView(items: scored)
                 case .commitments: CommitmentsView(items: scored)
                 case .reader:      ReaderFeed(items: scored)
                 }
@@ -236,23 +236,6 @@ private struct PriorityFeed: View {
     }
 }
 
-private struct UrgencyDial: View {
-    let value: Int
-    private var tint: Color {
-        value >= 70 ? .aetherMagenta : value >= 45 ? .aetherViolet : .secondary
-    }
-    var body: some View {
-        ZStack {
-            Circle().stroke(.secondary.opacity(0.2), lineWidth: 3)
-            Circle()
-                .trim(from: 0, to: CGFloat(value) / 100)
-                .stroke(tint, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            Text("\(value)").font(.caption2.weight(.bold)).foregroundStyle(tint)
-        }
-        .frame(width: 38, height: 38)
-    }
-}
 
 // MARK: - 2. Deck
 
@@ -355,7 +338,7 @@ private struct TriageDeck: View {
 
 /// Grouped by what a message IS rather than when it arrived, because a receipt
 /// and a question from a person are not the same kind of object.
-private struct ShelvesView: View {
+private struct LabShelvesView: View {
     let items: [(MailMessage, MailSignal)]
 
     private var shelves: [(MailCategory, [(MailMessage, MailSignal)])] {

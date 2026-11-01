@@ -15,6 +15,8 @@ final class MailStore {
     var foldersByAccount: [UUID: [MailFolder]] = [:]     // IMAP folder list per account
     var openBodies: [String: MailBody] = [:]     // message id → parsed body (observed)
     var summaries: [String: String] = [:]        // message id → on-device AI summary
+    var signals: [String: MailSignal] = [:]      // message id → computed MailSignal (urgency, category, reason)
+    var facts: [String: [MailExtract.Fact]] = [:] // message id → extracted facts (deadlines, codes, tracking)
     var readIDs: Set<String> = []                // locally-marked-read this session
     var syncState: [UUID: SyncState] = [:]       // per-account sync status (shown in UI)
     @ObservationIgnored private var summarizing: Set<String> = []
@@ -97,6 +99,7 @@ final class MailStore {
             for m in messages where openBodies[m.id] == nil {
                 openBodies[m.id] = MailBody(plainText: m.snippet)
             }
+            precomputeInsights(for: messages)
 
             let started = Date()
             var done = 0
@@ -597,6 +600,7 @@ final class MailStore {
             await client.disconnect()
             let clean = merged.filter { !isBlocked($0) }
             messagesByAccount[account.id] = clean
+            precomputeInsights(for: clean)
             let folderK = folderKey(account.id, "INBOX")
             messagesByFolder[folderK] = (messagesByFolder[folderK] ?? []).filter { !isBlocked($0) }
             syncState[account.id] = .ok
@@ -751,6 +755,7 @@ final class MailStore {
                     )
                     let clean = merged.filter { !isBlocked($0) }
                     messagesByAccount[account.id] = clean
+                    precomputeInsights(for: clean)
                     saveMessageCache()
                     let spam = merged.filter { isBlocked($0) }
                     if !spam.isEmpty {
@@ -761,12 +766,14 @@ final class MailStore {
                     // during background push wake so content is ready the instant the user opens it.
                     let cachedIDs = Set(cached.map(\.id))
                     let freshNew = clean.filter { !cachedIDs.contains($0.id) }
+                    precomputeInsights(for: freshNew)
                     for freshMsg in freshNew.prefix(5) {
                         if openBodies[freshMsg.id] == nil {
                             if let raw = try? await client.fetchRawMessage(uid: freshMsg.uid) {
                                 let parsed = MIMEMessageParser.parse(raw)
                                 if parsed.hasContent {
                                     openBodies[freshMsg.id] = parsed
+                                    updateInsights(for: freshMsg, bodyText: parsed.bestText)
                                     await MailCache.shared.saveBody(parsed, for: freshMsg.id)
                                 }
                             }
@@ -938,6 +945,41 @@ final class MailStore {
     var aiAvailable: Bool { MailAI.isAvailable }
     func summary(for id: String) -> String? { summaries[id] }
 
+    // MARK: - Insights & Intelligence (Zero Latency)
+
+    func signal(for m: MailMessage) -> MailSignal {
+        if let s = signals[m.id] { return s }
+        let text = openBodies[m.id]?.bestText ?? m.snippet
+        let s = MailInsight.signal(for: m, bodyText: text)
+        signals[m.id] = s
+        return s
+    }
+
+    func facts(for m: MailMessage) -> [MailExtract.Fact] {
+        if let f = facts[m.id] { return f }
+        let text = openBodies[m.id]?.bestText ?? m.snippet
+        let f = MailExtract.facts(in: m, body: text)
+        facts[m.id] = f
+        return f
+    }
+
+    func precomputeInsights(for messages: [MailMessage]) {
+        for m in messages {
+            let text = openBodies[m.id]?.bestText ?? m.snippet
+            if signals[m.id] == nil {
+                signals[m.id] = MailInsight.signal(for: m, bodyText: text)
+            }
+            if facts[m.id] == nil {
+                facts[m.id] = MailExtract.facts(in: m, body: text)
+            }
+        }
+    }
+
+    func updateInsights(for m: MailMessage, bodyText: String) {
+        signals[m.id] = MailInsight.signal(for: m, bodyText: bodyText)
+        facts[m.id] = MailExtract.facts(in: m, body: bodyText)
+    }
+
     func open(_ m: MailMessage) {
         readIDs.insert(m.id)                                // local mark-read
         saveMessageCache()                                  // ...and remember it across launches
@@ -957,6 +999,7 @@ final class MailStore {
         if let cached = await MailCache.shared.body(m.id) {
             openBodies[m.id] = cached
             bodyErrors[m.id] = nil
+            updateInsights(for: m, bodyText: cached.bestText)
             return
         }
         guard !loadingBodies.contains(m.id) else { return }
@@ -977,6 +1020,7 @@ final class MailStore {
             }
             openBodies[m.id] = parsed
             bodyErrors[m.id] = nil
+            updateInsights(for: m, bodyText: parsed.bestText)
             await MailCache.shared.saveBody(parsed, for: m.id)
         } catch {
             // Recorded separately from the body. Storing the error text *as* the

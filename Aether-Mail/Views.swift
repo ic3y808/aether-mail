@@ -95,8 +95,27 @@ struct OnboardingView: View {
 
 // MARK: - Inbox
 
+enum InboxViewMode: String, CaseIterable, Identifiable {
+    case all = "All Mail"
+    case today = "Today"
+    case priority = "Priority"
+    case shelves = "Shelves"
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .all: return "tray.fill"
+        case .today: return "sun.horizon.fill"
+        case .priority: return "arrow.up.circle.fill"
+        case .shelves: return "square.grid.2x2.fill"
+        }
+    }
+}
+
 struct InboxView: View {
     @Environment(MailStore.self) private var store
+    /// Persisted: user's chosen view mode survives app launches.
+    @AppStorage("inbox.viewMode") private var viewMode: InboxViewMode = .today
     /// Persisted: a filter that resets every launch is a filter you stop using.
     @AppStorage("inbox.showUnreadOnly") private var unreadOnly = false
     @State private var notificationsDenied = false
@@ -106,38 +125,103 @@ struct InboxView: View {
     }
 
     var body: some View {
-        List {
-            filterBar
+        VStack(spacing: 0) {
+            modeSwitcher
+
             if notificationsDenied {
-                Button {
-                    if let url = URL(string: UIApplication.openSettingsURLString) {
-                        UIApplication.shared.open(url)
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "bell.slash.fill").foregroundStyle(.yellow)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Notifications are turned off").font(.caption.weight(.semibold))
-                            Text("Tap here to allow notifications in iOS Settings so new email alerts work.")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
-                    }
-                    .padding(10)
-                    .background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.yellow.opacity(0.3)))
-                }
-                .buttonStyle(.plain)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 4, leading: 14, bottom: 4, trailing: 14))
+                notificationsBanner
             }
+
             ForEach(store.accounts.filter { store.syncState[$0.id]?.errorText != nil }) { account in
                 SyncErrorRow(account: account)
-                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 4, leading: 14, bottom: 4, trailing: 14))
+                    .padding(.horizontal, 14)
+                    .padding(.top, 4)
             }
+
+            Group {
+                switch viewMode {
+                case .today:
+                    TodayView()
+                case .priority:
+                    PriorityView()
+                case .shelves:
+                    ShelvesView()
+                case .all:
+                    allMailList
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .refreshable { await store.refresh() }
+        .task {
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            notificationsDenied = (settings.authorizationStatus == .denied)
+        }
+    }
+
+    private var modeSwitcher: some View {
+        HStack(spacing: 4) {
+            ForEach(InboxViewMode.allCases) { mode in
+                Button {
+                    withAnimation(.snappy) { viewMode = mode }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: mode.icon)
+                            .font(.system(size: 11))
+                        Text(mode.rawValue)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .frame(maxWidth: .infinity)
+                    .background {
+                        if viewMode == mode {
+                            Capsule().fill(LinearGradient.aether)
+                                .shadow(color: Color.aetherMagenta.opacity(0.35), radius: 5, y: 1)
+                        } else {
+                            Capsule().fill(Color.white.opacity(0.04))
+                        }
+                    }
+                    .foregroundStyle(viewMode == mode ? .white : .secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(4)
+        .background(Capsule().fill(.ultraThinMaterial))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.12)))
+        .padding(.horizontal, 14)
+        .padding(.top, 4)
+        .padding(.bottom, 6)
+    }
+
+    private var notificationsBanner: some View {
+        Button {
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(url)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "bell.slash.fill").foregroundStyle(.yellow)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Notifications are turned off").font(.caption.weight(.semibold))
+                    Text("Tap here to allow notifications in iOS Settings so new email alerts work.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
+            }
+            .padding(10)
+            .background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(.yellow.opacity(0.3)))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 4)
+    }
+
+    private var allMailList: some View {
+        List {
+            filterBar
             if store.aiAvailable {
                 Label("On-device AI ready — summaries run on your iPhone", systemImage: "sparkles")
                     .font(.caption).foregroundStyle(.secondary)
@@ -156,11 +240,6 @@ struct InboxView: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .refreshable { await store.refresh() }
-        .task {
-            let settings = await UNUserNotificationCenter.current().notificationSettings()
-            notificationsDenied = (settings.authorizationStatus == .denied)
-        }
         .overlay {
             if visible.isEmpty && !store.isSyncing && !store.hasSyncErrors {
                 if unreadOnly && !store.inbox.isEmpty {
@@ -213,6 +292,7 @@ struct InboxView: View {
         .buttonStyle(.plain)
     }
 }
+
 
 /// A tappable red strip explaining why an account didn't sync — so a failure is
 /// visible and retryable instead of a banner that vanishes after five seconds.
