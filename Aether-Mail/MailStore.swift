@@ -756,6 +756,23 @@ final class MailStore {
                     if !spam.isEmpty {
                         markAsJunk(spam)
                     }
+
+                    // Pre-warm message bodies and generate on-device AI summaries
+                    // during background push wake so content is ready the instant the user opens it.
+                    let cachedIDs = Set(cached.map(\.id))
+                    let freshNew = clean.filter { !cachedIDs.contains($0.id) }
+                    for freshMsg in freshNew.prefix(5) {
+                        if openBodies[freshMsg.id] == nil {
+                            if let raw = try? await client.fetchRawMessage(uid: freshMsg.uid) {
+                                let parsed = MIMEMessageParser.parse(raw)
+                                if parsed.hasContent {
+                                    openBodies[freshMsg.id] = parsed
+                                    await MailCache.shared.saveBody(parsed, for: freshMsg.id)
+                                }
+                            }
+                        }
+                        await summarizeIfNeeded(freshMsg)
+                    }
                 }
                 await client.disconnect()
             } catch {
