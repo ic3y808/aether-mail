@@ -31,8 +31,15 @@ struct RootView: View {
                                 }
                             }
                             ToolbarItem(placement: .topBarTrailing) {
-                                if store.isSyncing { ProgressView() }
-                                else { Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") } }
+                                HStack(spacing: 14) {
+                                    if store.isSyncing { ProgressView() }
+                                    else { Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") } }
+                                    Button {
+                                        store.beginCompose()
+                                    } label: {
+                                        Image(systemName: "square.and.pencil")
+                                    }
+                                }
                             }
                         }
                         .toolbarBackground(.hidden, for: .navigationBar)
@@ -488,6 +495,11 @@ struct ReadingView: View {
                 }
 
                 Button {
+                    store.reply(to: currentMessage, all: false)
+                } label: {
+                    Image(systemName: "arrowshape.turn.up.left")
+                }
+                Button {
                     store.toggleFlagged(currentMessage)
                 } label: {
                     Image(systemName: currentMessage.flags.contains(.flagged) ? "flag.fill" : "flag")
@@ -540,10 +552,20 @@ struct ReadingView: View {
                 Spacer()
 
                 Button {
-                    store.setRead(currentMessage, !store.isUnread(currentMessage))
+                    store.reply(to: currentMessage, all: false)
                 } label: {
-                    Image(systemName: store.isUnread(currentMessage) ? "envelope.open" : "envelope.badge")
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrowshape.turn.up.left.fill")
+                            .font(.subheadline.weight(.bold))
+                        Text("Reply")
+                            .font(.subheadline.weight(.bold))
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 7)
+                    .background(Capsule().fill(LinearGradient.aether))
+                    .foregroundStyle(.white)
+                    .shadow(color: Color.aetherViolet.opacity(0.3), radius: 6, y: 2)
                 }
+                .buttonStyle(.plain)
             }
         }
         .onAppear { store.open(currentMessage) }
@@ -565,9 +587,36 @@ struct ReadingView: View {
                     }
                 }
                 Spacer()
-                if let d = currentMessage.date {
-                    Text(d.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption2).foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 6) {
+                    if let d = currentMessage.date {
+                        Text(d.formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 6) {
+                        Button {
+                            store.reply(to: currentMessage, all: false)
+                        } label: {
+                            Label("Reply", systemImage: "arrowshape.turn.up.left.fill")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 10).padding(.vertical, 5)
+                                .background(Capsule().fill(LinearGradient.aether))
+                                .foregroundStyle(.white)
+                        }
+                        .buttonStyle(.plain)
+
+                        if currentMessage.to.count + currentMessage.cc.count > 1 {
+                            Button {
+                                store.reply(to: currentMessage, all: true)
+                            } label: {
+                                Image(systemName: "arrowshape.turn.up.left.2.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .padding(6)
+                                    .background(Circle().fill(.ultraThinMaterial))
+                                    .foregroundStyle(.primary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
                 }
             }
         }
@@ -601,7 +650,7 @@ struct ReadingView: View {
     private var bodyCard: some View {
         Group {
             if let body = store.body(for: currentMessage) {
-                EmailBodyView(content: body)
+                EmailBodyView(content: body, contextMessage: currentMessage)
             } else if let reason = store.bodyErrors[currentMessage.id] {
                 // A failure is shown in the app's own chrome with a way out. It
                 // used to be written into the body itself, which rendered it on
@@ -634,13 +683,68 @@ struct ReadingView: View {
     }
 
     @ViewBuilder private var askBox: some View {
-        if store.aiAvailable {
-            VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Button {
+                    store.reply(to: currentMessage, all: false)
+                } label: {
+                    Label("Reply", systemImage: "arrowshape.turn.up.left.fill")
+                        .font(.footnote.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(LinearGradient.aether, in: Capsule())
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+
+                if currentMessage.to.count + currentMessage.cc.count > 1 {
+                    Button {
+                        store.reply(to: currentMessage, all: true)
+                    } label: {
+                        Label("Reply All", systemImage: "arrowshape.turn.up.left.2.fill")
+                            .font(.footnote.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().strokeBorder(.white.opacity(0.16)))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button {
+                    store.forward(currentMessage)
+                } label: {
+                    Label("Forward", systemImage: "arrowshape.turn.up.right.fill")
+                        .font(.footnote.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.16)))
+                }
+                .buttonStyle(.plain)
+            }
+
+            if store.aiAvailable {
                 if let answer {
-                    Text(answer).font(.callout).textSelection(.enabled)
-                        .padding(12)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(answer).font(.callout).textSelection(.enabled)
+                        HStack {
+                            Spacer()
+                            Button {
+                                store.reply(to: currentMessage, all: false, initialBody: answer)
+                            } label: {
+                                Label("Use as Reply", systemImage: "arrowshape.turn.up.left.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 10).padding(.vertical, 6)
+                                    .background(Capsule().fill(LinearGradient.aether))
+                                    .foregroundStyle(.white)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(12)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 HStack(spacing: 8) {
                     TextField("Ask about this email…", text: $question, axis: .vertical)
@@ -1059,5 +1163,315 @@ struct AddMailboxView: View {
             working = false
             if let r { error = r } else { dismiss() }
         }
+    }
+}
+
+// MARK: - Compose / Reply / Forward
+
+struct ComposeView: View {
+    @Environment(MailStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    let draft: ComposeDraft
+
+    @State private var fromAccountID: UUID
+    @State private var to: String
+    @State private var cc: String
+    @State private var bcc: String
+    @State private var showCcBcc: Bool
+    @State private var subject: String
+    @State private var bodyText: String
+    @State private var includeQuoted = true
+    @State private var sending = false
+    @State private var draftingAI = false
+    @State private var error: String?
+    @FocusState private var focusedField: Field?
+
+    private enum Field { case to, subject, body }
+
+    init(draft: ComposeDraft) {
+        self.draft = draft
+        self._fromAccountID = State(initialValue: draft.accountID)
+        self._to = State(initialValue: draft.to)
+        self._cc = State(initialValue: draft.cc)
+        self._bcc = State(initialValue: draft.bcc)
+        self._showCcBcc = State(initialValue: !draft.cc.isEmpty || !draft.bcc.isEmpty)
+        self._subject = State(initialValue: draft.subject)
+        self._bodyText = State(initialValue: draft.body)
+    }
+
+    private var availableAccounts: [MailAccount] {
+        let enabled = store.enabledAccounts
+        return enabled.isEmpty ? store.accounts : enabled
+    }
+
+    private var canSend: Bool {
+        !parseAddresses(to).isEmpty && !sending
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    // Header fields card
+                    VStack(spacing: 10) {
+                        if availableAccounts.count > 1 {
+                            HStack {
+                                Text("From")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 54, alignment: .leading)
+                                Picker("From", selection: $fromAccountID) {
+                                    ForEach(availableAccounts) { acc in
+                                        Text(acc.emailAddress).tag(acc.id)
+                                    }
+                                }
+                                .labelsHidden()
+                                Spacer()
+                            }
+                            Divider().opacity(0.25)
+                        }
+
+                        HStack {
+                            Text("To")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 54, alignment: .leading)
+                            TextField("recipient@example.com", text: $to)
+                                .keyboardType(.emailAddress)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .focused($focusedField, equals: .to)
+                            if !showCcBcc {
+                                Button("Cc/Bcc") {
+                                    withAnimation(.snappy) { showCcBcc = true }
+                                }
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(Color.aetherViolet)
+                            }
+                        }
+
+                        if showCcBcc {
+                            Divider().opacity(0.25)
+                            HStack {
+                                Text("Cc")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 54, alignment: .leading)
+                                TextField("cc@example.com", text: $cc)
+                                    .keyboardType(.emailAddress)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                            }
+                            Divider().opacity(0.25)
+                            HStack {
+                                Text("Bcc")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 54, alignment: .leading)
+                                TextField("bcc@example.com", text: $bcc)
+                                    .keyboardType(.emailAddress)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                            }
+                        }
+
+                        Divider().opacity(0.25)
+                        HStack {
+                            Text("Subject")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 54, alignment: .leading)
+                            TextField("Subject", text: $subject)
+                                .focused($focusedField, equals: .subject)
+                        }
+                    }
+                    .padding(14)
+                    .glassCard(18)
+
+                    // AI Draft helper when replying to a message
+                    if let orig = draft.originalMessage, (store.aiAvailable || LabInference.shared.selected != nil) {
+                        HStack {
+                            Button {
+                                Task { await generateAIDraft(for: orig) }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    if draftingAI {
+                                        ProgressView().controlSize(.mini)
+                                        Text("Drafting reply…")
+                                    } else {
+                                        Image(systemName: "sparkles")
+                                        Text(bodyText.isEmpty ? "Draft Reply with AI" : "Redraft with AI")
+                                    }
+                                }
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 12).padding(.vertical, 7)
+                                .background(Capsule().fill(LinearGradient.aether.opacity(0.28)))
+                                .overlay(Capsule().strokeBorder(Color.aetherViolet.opacity(0.45)))
+                                .foregroundStyle(.white)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(draftingAI)
+
+                            Spacer()
+                        }
+                    }
+
+                    // Body editor card
+                    VStack(alignment: .leading, spacing: 8) {
+                        ZStack(alignment: .topLeading) {
+                            if bodyText.isEmpty {
+                                Text(draft.mode == .forward ? "Add a message…" : "Write your reply…")
+                                    .foregroundStyle(.secondary.opacity(0.6))
+                                    .padding(.top, 8)
+                                    .padding(.leading, 5)
+                            }
+                            TextEditor(text: $bodyText)
+                                .focused($focusedField, equals: .body)
+                                .scrollContentBackground(.hidden)
+                                .frame(minHeight: 180)
+                        }
+                    }
+                    .padding(12)
+                    .glassCard(18)
+
+                    // Quoted original message preview
+                    if !draft.quotedText.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Label("Quoted Message", systemImage: "quote.opening")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Toggle("Include", isOn: $includeQuoted)
+                                    .labelsHidden()
+                                    .tint(Color.aetherViolet)
+                            }
+                            if includeQuoted {
+                                Text(draft.quotedText)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(12)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(12)
+                        .glassCard(16)
+                    }
+
+                    if let error {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text(error)
+                                .font(.footnote)
+                                .foregroundStyle(.orange)
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .glassCard(14)
+                    }
+                }
+                .padding()
+            }
+            .background { AuroraBackdrop(intensity: 0.75) }
+            .navigationTitle(draft.mode.rawValue)
+            .navigationBarTitleDisplayMode(.inline)
+            .interactiveDismissDisabled(sending)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        store.activeDraft = nil
+                        dismiss()
+                    }
+                    .disabled(sending)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        Task { await send() }
+                    } label: {
+                        if sending {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            HStack(spacing: 4) {
+                                Text("Send").fontWeight(.semibold)
+                                Image(systemName: "paperplane.fill")
+                            }
+                        }
+                    }
+                    .disabled(!canSend)
+                }
+            }
+            .onAppear {
+                if to.isEmpty {
+                    focusedField = .to
+                } else if subject.isEmpty {
+                    focusedField = .subject
+                } else {
+                    focusedField = .body
+                }
+            }
+        }
+    }
+
+    private func generateAIDraft(for message: MailMessage) async {
+        draftingAI = true
+        defer { draftingAI = false }
+        if let written = await store.draftAIReply(for: message) {
+            bodyText = written
+        } else {
+            error = "AI drafting isn't available right now."
+        }
+    }
+
+    private func send() async {
+        guard let account = availableAccounts.first(where: { $0.id == fromAccountID }) ?? availableAccounts.first else {
+            error = "No sending account selected."
+            return
+        }
+        let recipients = parseAddresses(to)
+        guard !recipients.isEmpty else {
+            error = "Enter at least one valid recipient email address."
+            return
+        }
+
+        sending = true
+        error = nil
+        defer { sending = false }
+
+        let latestQuoted = draft.originalMessage.map { store.quotedReply(for: $0) } ?? draft.quotedText
+        let fullText: String
+        if includeQuoted && !latestQuoted.isEmpty {
+            fullText = bodyText.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + latestQuoted
+        } else {
+            fullText = bodyText
+        }
+
+        let outgoing = OutgoingMessage(
+            from: MailAddress(name: account.displayName, address: account.emailAddress),
+            to: recipients,
+            cc: parseAddresses(cc),
+            bcc: parseAddresses(bcc),
+            subject: subject.isEmpty ? "(no subject)" : subject,
+            textBody: fullText,
+            inReplyTo: draft.inReplyTo,
+            references: draft.references
+        )
+
+        if let err = await store.send(outgoing, from: account, replyingTo: draft.originalMessage) {
+            error = err
+        } else {
+            dismiss()
+        }
+    }
+
+    private func parseAddresses(_ raw: String) -> [MailAddress] {
+        raw.split(whereSeparator: { $0 == "," || $0 == ";" })
+            .map { part -> MailAddress in
+                let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
+                let clean = MailStore.cleanAddress(trimmed)
+                return MailAddress(address: clean)
+            }
+            .filter { $0.address.contains("@") }
     }
 }

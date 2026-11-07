@@ -174,6 +174,16 @@ struct TodayView: View {
                                                 .font(.caption2)
                                                 .foregroundStyle(.secondary)
                                         }
+                                        Button {
+                                            store.reply(to: m, all: false)
+                                        } label: {
+                                            Image(systemName: "arrowshape.turn.up.left.fill")
+                                                .font(.caption.weight(.bold))
+                                                .padding(8)
+                                                .background(Circle().fill(LinearGradient.aether))
+                                                .foregroundStyle(.white)
+                                        }
+                                        .buttonStyle(.plain)
                                     }
                                     .padding(12)
                                     .glassCard(16)

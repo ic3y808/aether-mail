@@ -36,8 +36,14 @@ private struct MessageActions: ViewModifier {
                 } label: { Label("Archive", systemImage: "archivebox") }
                     .tint(.indigo)
             }
-            // Leading edge: the non-destructive pair.
+            // Leading edge: the non-destructive pair + quick reply.
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                Button {
+                    store.reply(to: message)
+                } label: {
+                    Label("Reply", systemImage: "arrowshape.turn.up.left.fill")
+                }
+                .tint(Color.aetherViolet)
                 Button {
                     store.setRead(message, isUnread)
                 } label: {
@@ -64,6 +70,18 @@ struct MessageMenu: View {
     let store: MailStore
 
     var body: some View {
+        Button("Reply", systemImage: "arrowshape.turn.up.left") {
+            store.reply(to: message, all: false)
+        }
+        Button("Reply All", systemImage: "arrowshape.turn.up.left.2") {
+            store.reply(to: message, all: true)
+        }
+        Button("Forward", systemImage: "arrowshape.turn.up.right") {
+            store.forward(message)
+        }
+
+        Divider()
+
         Button(store.isUnread(message) ? "Mark as Read" : "Mark as Unread",
                systemImage: store.isUnread(message) ? "envelope.open" : "envelope.badge") {
             store.setRead(message, store.isUnread(message))
@@ -133,6 +151,9 @@ struct MessageActionChrome: ViewModifier {
                 Button("Cancel", role: .cancel) { store.pendingDelete = nil }
             } message: {
                 Text("This can't be undone.")
+            }
+            .sheet(item: $store.activeDraft) { draft in
+                ComposeView(draft: draft)
             }
             .overlay(alignment: .bottom) { undoToast }
     }

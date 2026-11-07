@@ -8,12 +8,13 @@ import EmailKit
 /// an actual email.
 struct EmailBodyView: View {
     let content: MailBody
+    var contextMessage: MailMessage? = nil
     @State private var height: CGFloat = 80
 
     var body: some View {
         Group {
             if let html = content.html, !html.isEmpty {
-                EmailHTMLView(html: html, height: $height)
+                EmailHTMLView(html: html, contextMessage: contextMessage, height: $height)
                     .frame(height: height)
                     .frame(maxWidth: .infinity)
                     .background(.white)
@@ -40,10 +41,11 @@ struct EmailBodyView: View {
 /// content height back to SwiftUI so the outer ScrollView owns the scrolling.
 private struct EmailHTMLView: UIViewRepresentable {
     let html: String
+    var contextMessage: MailMessage? = nil
     @Binding var height: CGFloat
 
     func makeCoordinator() -> EmailHTMLCoordinator {
-        EmailHTMLCoordinator(onHeightChange: { [self] newHeight in
+        EmailHTMLCoordinator(contextMessage: contextMessage, onHeightChange: { [self] newHeight in
             self.height = newHeight
         })
     }
@@ -68,6 +70,7 @@ private struct EmailHTMLView: UIViewRepresentable {
     func updateUIView(_ web: WKWebView, context: Context) {
         if web.navigationDelegate == nil { web.navigationDelegate = context.coordinator }
         if web.uiDelegate == nil { web.uiDelegate = context.coordinator }
+        context.coordinator.contextMessage = contextMessage
         context.coordinator.onHeightChange = { newHeight in
             self.height = newHeight
         }
@@ -165,13 +168,15 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
 /// WKNavigationDelegate and WKUIDelegate selectors are reliably visible to WebKit
 /// and links never accidentally navigate in the email body frame.
 final class EmailHTMLCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+    var contextMessage: MailMessage?
     var onHeightChange: ((CGFloat) -> Void)?
     var lastHTML: String?
     private var pendingWebViews: [WKWebView] = []
 
     private static let internalSchemes: Set<String> = ["about", "applewebdata", "data", "blob"]
 
-    init(onHeightChange: ((CGFloat) -> Void)? = nil) {
+    init(contextMessage: MailMessage? = nil, onHeightChange: ((CGFloat) -> Void)? = nil) {
+        self.contextMessage = contextMessage
         self.onHeightChange = onHeightChange
     }
 
@@ -239,7 +244,13 @@ final class EmailHTMLCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate, 
         guard !scheme.isEmpty, !Self.internalSchemes.contains(scheme) else {
             return false
         }
+        let ctx = self.contextMessage
         DispatchQueue.main.async {
+            if scheme == "mailto" {
+                MailStore.shared.handleMailto(url, contextMessage: ctx)
+                return
+            }
+
             // If it's a web URL (http or https), prioritize Google Chrome if installed
             if scheme == "http" || scheme == "https" {
                 if let chromeURL = Self.chromeURL(from: url), UIApplication.shared.canOpenURL(chromeURL) {

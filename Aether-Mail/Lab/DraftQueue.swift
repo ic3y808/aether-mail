@@ -129,6 +129,12 @@ struct DraftQueue: View {
 
             HStack(spacing: 10) {
                 Button {
+                    let text = edited[m.id] ?? drafts[m.id] ?? ""
+                    store.reply(to: m, all: false, initialBody: text)
+                } label: {
+                    Label("Reply", systemImage: "paperplane.fill").font(.caption.weight(.semibold))
+                }
+                Button {
                     UIPasteboard.general.string = edited[m.id] ?? drafts[m.id] ?? ""
                     store.banner = "Draft copied."
                 } label: {

@@ -160,20 +160,7 @@ struct ShelvesView: View {
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
-                            Button { store.setRead(m, !isUnread) } label: {
-                                Label(isUnread ? "Mark as Read" : "Mark as Unread",
-                                      systemImage: isUnread ? "envelope.open" : "envelope.badge")
-                            }
-                            Button { store.toggleFlagged(m) } label: {
-                                Label(m.flags.contains(.flagged) ? "Unflag" : "Flag",
-                                      systemImage: m.flags.contains(.flagged) ? "flag.slash" : "flag")
-                            }
-                            Button { store.archive([m]) } label: {
-                                Label("Archive", systemImage: "archivebox")
-                            }
-                            Button(role: .destructive) { store.requestDelete([m]) } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
+                            MessageMenu(message: m, store: store)
                         }
                     }
                 }

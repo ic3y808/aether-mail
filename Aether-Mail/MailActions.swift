@@ -1,7 +1,30 @@
 import Foundation
 import EmailKit
 
-/// Message actions: read/unread, flag, archive, junk, move and delete.
+/// Draft state for composing a new message, replying, or forwarding.
+struct ComposeDraft: Identifiable, Equatable {
+    enum Mode: String, Equatable {
+        case compose = "New Message"
+        case reply = "Reply"
+        case replyAll = "Reply All"
+        case forward = "Forward"
+    }
+
+    let id = UUID()
+    var mode: Mode
+    var accountID: UUID
+    var to: String
+    var cc: String = ""
+    var bcc: String = ""
+    var subject: String
+    var body: String = ""
+    var quotedText: String = ""
+    var inReplyTo: String? = nil
+    var references: [String] = []
+    var originalMessage: MailMessage? = nil
+}
+
+/// Message actions: read/unread, flag, archive, junk, move, delete, compose and reply.
 ///
 /// The app shipped as a reader — EmailKit could already `store` flags, `move`
 /// and `expunge`, but nothing in the UI reached any of it, and marking a message
@@ -409,5 +432,245 @@ extension MailStore {
             if !list.contains(where: { $0.id == m.id }) { list.append(m) }
             messagesByFolder[key] = list
         }
+    }
+
+    // MARK: - Compose / Reply / Forward / Send
+
+    func beginCompose(to: String = "", subject: String = "", body: String = "", accountID: UUID? = nil) {
+        guard let accID = accountID ?? enabledAccounts.first?.id ?? accounts.first?.id else {
+            banner = "Add a mail account first to send messages."
+            return
+        }
+        activeDraft = ComposeDraft(
+            mode: .compose,
+            accountID: accID,
+            to: to,
+            subject: subject,
+            body: body
+        )
+    }
+
+    func reply(to message: MailMessage, all: Bool = false, initialBody: String = "") {
+        guard let account = account(for: message) ?? enabledAccounts.first ?? accounts.first else {
+            banner = "No mail account available to reply from."
+            return
+        }
+        var toList = message.from.map(\.address)
+            .filter { $0.caseInsensitiveCompare(account.emailAddress) != .orderedSame }
+        if toList.isEmpty {
+            toList = message.to.map(\.address)
+            if toList.isEmpty {
+                toList = message.from.map(\.address)
+            }
+        }
+        var ccList: [String] = []
+        if all {
+            toList += message.to.map(\.address)
+                .filter { $0.caseInsensitiveCompare(account.emailAddress) != .orderedSame }
+            ccList = message.cc.map(\.address)
+                .filter { $0.caseInsensitiveCompare(account.emailAddress) != .orderedSame }
+        }
+        let rawSubject = message.subject.isEmpty ? "(no subject)" : message.subject
+        let subject = rawSubject.lowercased().hasPrefix("re:") ? rawSubject : "Re: \(rawSubject)"
+
+        activeDraft = ComposeDraft(
+            mode: all ? .replyAll : .reply,
+            accountID: account.id,
+            to: Self.dedupeAddresses(toList).joined(separator: ", "),
+            cc: Self.dedupeAddresses(ccList).joined(separator: ", "),
+            subject: subject,
+            body: initialBody,
+            quotedText: quotedReply(for: message),
+            inReplyTo: message.messageID,
+            references: message.messageID.map { [$0] } ?? [],
+            originalMessage: message
+        )
+
+        if openBodies[message.id] == nil {
+            Task { @MainActor in
+                await loadBody(message)
+                if var current = activeDraft, current.originalMessage?.id == message.id {
+                    current.quotedText = quotedReply(for: message)
+                    activeDraft = current
+                }
+            }
+        }
+    }
+
+    func forward(_ message: MailMessage) {
+        guard let account = account(for: message) ?? enabledAccounts.first ?? accounts.first else {
+            banner = "No mail account available to forward from."
+            return
+        }
+        let rawSubject = message.subject.isEmpty ? "(no subject)" : message.subject
+        let subject = rawSubject.lowercased().hasPrefix("fwd:") ? rawSubject : "Fwd: \(rawSubject)"
+        let header = "---------- Forwarded message ----------\n"
+        activeDraft = ComposeDraft(
+            mode: .forward,
+            accountID: account.id,
+            to: "",
+            subject: subject,
+            body: "",
+            quotedText: header + quotedReply(for: message),
+            originalMessage: message
+        )
+
+        if openBodies[message.id] == nil {
+            Task { @MainActor in
+                await loadBody(message)
+                if var current = activeDraft, current.originalMessage?.id == message.id {
+                    current.quotedText = header + quotedReply(for: message)
+                    activeDraft = current
+                }
+            }
+        }
+    }
+
+    /// Handles a `mailto:` link tapped inside an email body or passed via URL scheme.
+    func handleMailto(_ url: URL, contextMessage: MailMessage? = nil) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        let toAddress = components.path.removingPercentEncoding ?? components.path
+        var subject = ""
+        var cc = ""
+        var bcc = ""
+        var body = ""
+        for item in components.queryItems ?? [] {
+            let val = item.value ?? ""
+            switch item.name.lowercased() {
+            case "subject": subject = val
+            case "cc":      cc = val
+            case "bcc":     bcc = val
+            case "body":    body = val
+            case "to" where toAddress.isEmpty:
+                break
+            default: break
+            }
+        }
+        let accID = contextMessage.flatMap { account(for: $0)?.id }
+            ?? enabledAccounts.first?.id
+            ?? accounts.first?.id
+        guard let accID else {
+            banner = "Add a mail account first to send messages."
+            return
+        }
+        if subject.isEmpty, let ctx = contextMessage, !ctx.subject.isEmpty {
+            subject = ctx.subject.lowercased().hasPrefix("re:") ? ctx.subject : "Re: \(ctx.subject)"
+        }
+        activeDraft = ComposeDraft(
+            mode: contextMessage != nil ? .reply : .compose,
+            accountID: accID,
+            to: toAddress,
+            cc: cc,
+            bcc: bcc,
+            subject: subject,
+            body: body,
+            quotedText: contextMessage.map { quotedReply(for: $0) } ?? "",
+            inReplyTo: contextMessage?.messageID,
+            references: contextMessage?.messageID.map { [$0] } ?? [],
+            originalMessage: contextMessage
+        )
+    }
+
+    func quotedReply(for message: MailMessage) -> String {
+        let who = message.from.first?.shortLabel ?? "someone"
+        let when = message.date?.formatted(date: .abbreviated, time: .shortened) ?? ""
+        let text = body(for: message)?.bestText ?? message.snippet
+        let quoted = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { "> \($0)" }
+            .joined(separator: "\n")
+        if when.isEmpty {
+            return "\(who) wrote:\n\(quoted)"
+        }
+        return "On \(when), \(who) wrote:\n\(quoted)"
+    }
+
+    private static func dedupeAddresses(_ addrs: [String]) -> [String] {
+        var seen = Set<String>()
+        return addrs.filter { addr in
+            let clean = cleanAddress(addr)
+            return !clean.isEmpty && seen.insert(clean).inserted
+        }
+    }
+
+    /// Generates an AI-drafted reply for `message` using LAN inference if selected,
+    /// falling back to on-device Apple FoundationModels.
+    func draftAIReply(for message: MailMessage) async -> String? {
+        if openBodies[message.id] == nil {
+            await loadBody(message)
+        }
+        let bodyText = body(for: message)?.bestText ?? message.snippet
+        guard !bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+
+        let systemInstruction = """
+        Write ONLY the body of a reply to this email, in the first person, as the \
+        recipient. Two or three sentences, and it must read as a complete message.
+
+        Rules:
+        - Use ONLY facts stated in the email itself. Never invent a number, date, \
+          price, quantity or commitment.
+        - If it asks something only the recipient could know, write a full sentence \
+          around a square-bracket blank, for example "The tolerance we need is [tolerance]."
+        - No preamble such as "Here is a draft". No quotation marks around the reply.
+        - Output the reply text and nothing else.
+        """
+
+        if LabInference.shared.selected != nil {
+            let userPrompt = "From: \(message.from.first?.shortLabel ?? "unknown")\nSubject: \(message.subject)\n\n\(String(bodyText.prefix(4000)))"
+            if let written = await LabInference.shared.complete(system: systemInstruction, user: userPrompt) {
+                return DraftQueue.stripPreamble(written)
+            }
+        }
+        if MailAI.isAvailable {
+            if let written = await MailAI.ask(
+                systemInstruction,
+                subject: message.subject,
+                from: message.from.first?.shortLabel ?? "unknown",
+                body: bodyText
+            ) {
+                return DraftQueue.stripPreamble(written)
+            }
+        }
+        return nil
+    }
+
+    /// Sends an `OutgoingMessage` via `account`'s SMTP server and marks `replyingTo`
+    /// as `\Answered` when applicable. Returns `nil` on success or a friendly error.
+    func send(_ message: OutgoingMessage, from account: MailAccount, replyingTo: MailMessage? = nil) async -> String? {
+        if demoMode || account.credentialRef == "demo" {
+            if let orig = replyingTo {
+                mutateLocal(orig) { $0.flags.insert(.answered) }
+            }
+            activeDraft = nil
+            banner = "Message sent."
+            return nil
+        }
+
+        do {
+            let client = try await openSMTP(for: account)
+            let raw = MIMEBuilder.build(message)
+            try await client.send(
+                from: account.emailAddress,
+                recipients: message.envelopeRecipients,
+                rawMessage: raw
+            )
+            await client.quit()
+        } catch {
+            return "Couldn't send — \(friendly(error))"
+        }
+
+        if let orig = replyingTo, let origAccount = self.account(for: orig) {
+            mutateLocal(orig) { $0.flags.insert(.answered) }
+            Task { @MainActor in
+                if let imap = try? await openIMAP(for: origAccount) {
+                    _ = try? await imap.select(orig.folderPath)
+                    try? await imap.store(uid: orig.uid, flag: "\\Answered", add: true)
+                    await imap.disconnect()
+                }
+            }
+        }
+
+        activeDraft = nil
+        banner = "Message sent."
+        return nil
     }
 }

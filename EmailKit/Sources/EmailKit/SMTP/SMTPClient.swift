@@ -67,6 +67,16 @@ public actor SMTPClient {
         guard p.code == 235 else { throw SMTPClientError.authenticationFailed(p.lines.joined()) }
     }
 
+    public func authPlain(user: String, password: String) async throws {
+        var bytes: [UInt8] = [0]
+        bytes.append(contentsOf: user.utf8)
+        bytes.append(0)
+        bytes.append(contentsOf: password.utf8)
+        let token = Data(bytes).base64EncodedString()
+        let reply = try await command("AUTH PLAIN \(token)")
+        guard reply.code == 235 else { throw SMTPClientError.authenticationFailed(reply.lines.joined()) }
+    }
+
     public func authXOAUTH2(user: String, accessToken: String) async throws {
         let ir = OAuthPKCE.xoauth2String(user: user, accessToken: accessToken)
         let reply = try await command("AUTH XOAUTH2 \(ir)")

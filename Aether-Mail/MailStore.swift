@@ -234,6 +234,7 @@ final class MailStore {
     }
 
     var isAddingAccount = false
+    var activeDraft: ComposeDraft?
     var isSyncing = false
     var banner: String?
 
@@ -278,7 +279,9 @@ final class MailStore {
     var unreadCount: Int { inbox.filter { isUnread($0) }.count }
     var hasSyncErrors: Bool { enabledAccounts.contains { syncState[$0.id]?.errorText != nil } }
 
-    func account(for m: MailMessage) -> MailAccount? { accounts.first { $0.id == m.accountID } }
+    func account(for m: MailMessage) -> MailAccount? {
+        accounts.first { $0.id == m.accountID } ?? enabledAccounts.first { $0.id == m.accountID } ?? enabledAccounts.first
+    }
     func isUnread(_ m: MailMessage) -> Bool { m.isUnread && !readIDs.contains(m.id) }
     func body(for m: MailMessage) -> MailBody? { openBodies[m.id] }
 
@@ -451,6 +454,25 @@ final class MailStore {
                 } catch {
                     try await client.authenticatePlain(user: account.emailAddress, password: pw)
                 }
+            }
+        } else {
+            throw NSError(domain: "AetherMail", code: 1, userInfo: [NSLocalizedDescriptionKey: "No saved credentials."])
+        }
+        return client
+    }
+
+    func openSMTP(for account: MailAccount) async throws -> SMTPClient {
+        let client = SMTPClient(transport: makeTransport(account.smtp))
+        try await client.connect(clientHostname: "aether-mail.local", useStartTLS: account.smtp.security == .startTLS)
+        if account.effectiveAuth == .oauth {
+            let token = try await validAccessToken(for: account)
+            try await client.authXOAUTH2(user: account.emailAddress, accessToken: token)
+        } else if let rawPw = Keychain.getString(account.credentialRef) {
+            let pw = normalizedPassword(rawPw, account.provider)
+            do {
+                try await client.authLogin(user: account.emailAddress, password: pw)
+            } catch {
+                try await client.authPlain(user: account.emailAddress, password: pw)
             }
         } else {
             throw NSError(domain: "AetherMail", code: 1, userInfo: [NSLocalizedDescriptionKey: "No saved credentials."])

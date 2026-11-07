@@ -83,6 +83,11 @@ struct AetherMailApp: App {
                 .environment(store)
                 .tint(.aetherViolet)
                 .preferredColorScheme(.dark)   // the aurora-glass look is dark-first
+                .onOpenURL { url in
+                    if url.scheme?.lowercased() == "mailto" {
+                        store.handleMailto(url)
+                    }
+                }
                 .task {
                     // Debug + Simulator only: signs in from a file on the Mac so
                     // a rebuild does not mean retyping an app password.
