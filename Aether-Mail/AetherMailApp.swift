@@ -48,8 +48,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
         Task { @MainActor in
-            let count = await MailStore.shared.backgroundQuickSync()
-            BackgroundRefresh.recordCheck(summary: "Push wake: \(count) announced")
+            let aps = userInfo["aps"] as? [String: Any]
+            let hasVisibleAlert = aps?["alert"] != nil
+            MailNotifier.shared.recordRemoteNotification(userInfo: userInfo, accounts: MailStore.shared.accounts)
+            let count = await MailStore.shared.backgroundQuickSync(suppressLocalNotifications: hasVisibleAlert)
+            BackgroundRefresh.recordCheck(summary: hasVisibleAlert ? "Push wake: synced (APNs alerted)" : "Push wake: \(count) announced")
             completionHandler(count > 0 ? .newData : .noData)
         }
     }
@@ -119,35 +122,21 @@ struct AetherMailApp: App {
                             store.updateIconBadge()
                         }
                     case .background:
+                        // Stop foreground IDLE sockets so APNs is the sole push source while backgrounded
+                        store.stopAllIdle()
                         // Schedule periodic background refresh with iOS
                         BackgroundRefresh.schedule()
                         store.updateIconBadge()
 
-                        // Request an execution grace period from iOS (~30 seconds)
-                        // so ongoing syncs finish and incoming mail can be notified immediately
+                        // Request a brief execution grace period from iOS so any in-flight sync finishes
                         var taskID: UIBackgroundTaskIdentifier = .invalid
                         taskID = UIApplication.shared.beginBackgroundTask(withName: "com.aether.mail.backgroundGrace") {
-                            // Expiration handler: iOS is revoking time
-                            store.stopAllIdle()
                             if taskID != .invalid {
                                 UIApplication.shared.endBackgroundTask(taskID)
                                 taskID = .invalid
                             }
                         }
                         backgroundTaskID = taskID
-
-                        // Keep IDLE alive during background grace period until iOS revokes time
-                        Task {
-                            while UIApplication.shared.backgroundTimeRemaining > 4 {
-                                try? await Task.sleep(for: .seconds(2))
-                                if backgroundTaskID == .invalid { break }
-                            }
-                            if taskID != .invalid {
-                                store.stopAllIdle()
-                                UIApplication.shared.endBackgroundTask(taskID)
-                                taskID = .invalid
-                            }
-                        }
                     default:
                         break
                     }

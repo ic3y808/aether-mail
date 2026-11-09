@@ -730,16 +730,10 @@ final class MailStore {
             WatchBridge.shared.sync(from: self)   // mirror the fresh inbox to the watch
             startAllIdle()                        // start live IMAP push for enabled accounts
             if !demoMode {
-                if !MailNotifier.shared.hasAnnouncedAnything {
-                    MailNotifier.shared.suppress(inbox)
-                } else {
-                    await MailNotifier.shared.announce(
-                        inbox,
-                        unreadTotal: unreadCount,
-                        blockedAddresses: blockedSenders,
-                        blockedChecker: { [weak self] m in self?.isBlocked(m) ?? false }
-                    )
-                }
+                // Foreground refresh updates the inbox and suppresses already-present mail so
+                // opening the app or pulling to refresh does not re-fire local banners for
+                // messages that APNs already alerted on.
+                MailNotifier.shared.suppress(inbox, accounts: accounts)
                 updateIconBadge()
             }
             prefetchInbox()                        // warm bodies + AI summaries in the background
@@ -749,14 +743,16 @@ final class MailStore {
         await task.value
     }
 
-    /// Fast, lightweight background check designed for BGAppRefreshTask.
+    /// Fast, lightweight background check designed for BGAppRefreshTask and APNs push wakes.
     /// Connects to INBOX for enabled accounts, fetches any newly arrived UIDs,
-    /// enforces blocklist, and announces unread mail. Completes in 1-3 seconds.
-    func backgroundQuickSync() async -> Int {
+    /// enforces blocklist, and announces unread mail (unless `suppressLocalNotifications` is true,
+    /// e.g. when woken by an APNs push that already displayed a visible alert banner).
+    func backgroundQuickSync(suppressLocalNotifications: Bool = false) async -> Int {
         guard !demoMode, !enabledAccounts.isEmpty else { return 0 }
         if !cacheRestored {
             await restoreCache()
         }
+        var freshTotal = 0
         for account in enabledAccounts {
             do {
                 let client = try await openIMAP(for: account)
@@ -788,6 +784,7 @@ final class MailStore {
                     // during background push wake so content is ready the instant the user opens it.
                     let cachedIDs = Set(cached.map(\.id))
                     let freshNew = clean.filter { !cachedIDs.contains($0.id) }
+                    freshTotal += freshNew.count
                     precomputeInsights(for: freshNew)
                     for freshMsg in freshNew.prefix(5) {
                         if openBodies[freshMsg.id] == nil {
@@ -809,9 +806,17 @@ final class MailStore {
             }
         }
 
+        if suppressLocalNotifications {
+            MailNotifier.shared.suppress(inbox, accounts: accounts)
+            updateIconBadge()
+            WatchBridge.shared.sync(from: self)
+            return freshTotal
+        }
+
         let announced = await MailNotifier.shared.announce(
             inbox,
             unreadTotal: unreadCount,
+            accounts: accounts,
             blockedAddresses: blockedSenders,
             blockedChecker: { [weak self] m in self?.isBlocked(m) ?? false }
         )
@@ -835,6 +840,7 @@ final class MailStore {
         let announced = await MailNotifier.shared.announce(
             inbox,
             unreadTotal: unreadCount,
+            accounts: accounts,
             blockedAddresses: blockedSenders,
             blockedChecker: { [weak self] m in self?.isBlocked(m) ?? false }
         )
@@ -884,11 +890,23 @@ final class MailStore {
                             Task { @MainActor [weak self] in
                                 guard let self else { return }
                                 await self.sync(account)
-                                if !self.demoMode {
-                                    await MailNotifier.shared.announce(self.inbox, unreadTotal: self.unreadCount, blockedAddresses: self.blockedSenders)
-                                }
                                 self.updateIconBadge()
                                 self.prefetchInbox()
+                                if !self.demoMode {
+                                    if MailNotifier.shared.apnsToken != nil {
+                                        // Give the APNs push bridge a brief window to deliver the canonical
+                                        // remote notification first; if it doesn't arrive (e.g. bridge offline),
+                                        // announce locally as a fallback.
+                                        try? await Task.sleep(for: .milliseconds(2500))
+                                    }
+                                    await MailNotifier.shared.announce(
+                                        self.inbox,
+                                        unreadTotal: self.unreadCount,
+                                        accounts: self.accounts,
+                                        blockedAddresses: self.blockedSenders,
+                                        blockedChecker: { [weak self] m in self?.isBlocked(m) ?? false }
+                                    )
+                                }
                             }
                         default:
                             break
